@@ -224,13 +224,19 @@ prompt_curriculo_otimizado = PromptTemplate(
         **Experiencia Profissional**
 
         **Cargo**
-        **[EXPERIENCIA_VIA_VAREJO]** | 2019 - 2021
+        **[EXPERIENCIA_VIA_VAREJO]** | 2020 - 2026
         - Entrega de valor com impacto mensuravel
         - Tecnologias utilizadas
         - Resultado alcancado
 
         **Cargo**
         **[EXPERIENCIA_SUPERDIGITAL]** | 2021 - 2023
+        - Entrega de valor com impacto mensuravel
+        - Tecnologias utilizadas
+        - Resultado alcancado
+
+        **Cargo**
+        **[EXPERIENCIA_INMETRICS]** | 2019 - 2019
         - Entrega de valor com impacto mensuravel
         - Tecnologias utilizadas
         - Resultado alcancado
