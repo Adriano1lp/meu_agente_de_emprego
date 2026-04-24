@@ -1,0 +1,415 @@
+[PERFIL]
+
+Nome: Adriano Lima Pereira
+Cargo: Senior QA Automation Engineer
+Telefone: (11) 966394923
+Email: adrianolima1p@gmail.com
+Idade: 37 anos
+LinkedIn: linkedin.com/in/adriano-lima-76764085
+
+Resumo:
+Engenheiro de QA Sênior com mais de 8 anos de experiência em automação full-stack (API e E2E), testes de performance e carga. Especialista na construção de frameworks escaláveis e resilientes integrados a pipelines de CI/CD. Atualmente expandindo atuação para Engenharia de IA, com foco em arquiteturas RAG, sistemas multi-agentes e visão computacional utilizando YOLO e MediaPipe.
+
+Diferencial:
+Combina práticas sólidas de QA com inovação em IA, integrando LLMs, visão computacional e automação para criar soluções inteligentes e escaláveis.
+
+---
+
+[OBJETIVOS]
+
+Curto Prazo (2 anos):
+- Dominar arquiteturas RAG
+- Construir ecossistemas multi-agentes
+- Alcançar fluência em inglês técnico
+- Atuar em projetos globais
+
+Longo Prazo (5 anos):
+- Liderar iniciativas com IA
+- Implementar testes self-healing
+- Predição de bugs com IA
+- Transição completa para AI Engineering
+- Experiência internacional
+
+---
+
+[SKILLS_PROGRAMACAO]
+
+Java: mais de 8 anos, nível avançado
+Python: mais de 2 anos (automação e IA), nível avançado
+JavaScript: 4 anos, nível avançado
+Ruby: 4 anos, nível avançado
+NodeJS: experiência intermediária
+
+---
+
+[SKILLS_AUTOMACAO_TESTES]
+
+Cypress:
+- 4 anos de experiência
+- Automação de Testes E2E Web e API
+- Integração com CI/CD
+- Nível avançado
+- Linguagem base Javascript
+
+Robot Framework:
+- 1 ano de experiência
+- Automação de Testes em dispositivos móveis Mobile (Android/iOS)
+- RPA
+- Nível intermediário/avançado
+- Linguagem base Python
+
+Selenium:
+- Mais de 2 anos
+- Automação de Testes E2E Web
+- Nível avançado
+
+Capybara:
+- 4 anos
+- Automação de Testes E2E Web e API
+- Nível avançado
+- Linguagem base Ruby
+
+Appium:
+- Experiência avançada
+- Automação de Testes em dispositivos móveis Mobile (Android/iOS)
+- Execução em dispositivos reais e nuvem
+
+Rest Assured:
+- 1 ano
+- Automação de Testes de API
+- Nível intermediário
+- Linguagem base Java
+
+---
+
+[SKILLS_API]
+
+Postman: mais de 8 anos
+SoapUI: mais de 8 anos
+Charles Proxy: experiência em debugging
+
+Foco:
+- Validação de contratos
+- Integridade de dados
+- Integração de microserviços
+
+---
+
+[SKILLS_PERFORMANCE]
+
+JMeter: mais de 5 anos
+K6: mais de 5 anos
+Grafana: monitoramento
+Dynatrace: observabilidade
+
+Foco:
+- Testes de carga
+- Testes de stress
+- Identificação de gargalos
+
+---
+
+[SKILLS_MENSAGERIA]
+
+Kafka:
+- 5 anos de experiência
+- Validação de eventos
+- Fluxos assíncronos
+
+---
+
+[SKILLS_BANCO_DADOS]
+
+Bancos Relacionais:
+- SQL Server
+- MySQL
+- Oracle PL/SQL
+- SQLite
+- Mais de 10 anos de experiência
+
+NoSQL:
+- MongoDB
+- Google Firestore
+- Nível avançado
+
+---
+
+[SKILLS_CLOUD_DEVOPS]
+
+Cloud:
+- AWS (ECS, Device Farm)
+- Azure
+- GCP (Firestore, SDK)
+
+CI/CD:
+- Jenkins
+- GitHub Actions
+- Azure DevOps
+- Maven / Gradle
+
+Containerização:
+- Docker (mais de 6 anos)
+
+---
+
+[SKILLS_IA]
+
+Foco:
+- RAG (Retrieval-Augmented Generation)
+- Sistemas multi-agentes
+- Engenharia de contexto
+
+Frameworks:
+- LangChain
+- LangGraph
+- CrewAI
+- LlamaIndex
+- AutoGen
+- Semantic Kernel
+
+Plataformas:
+- OpenAI
+- Anthropic Claude
+- Azure AI
+- Amazon Bedrock
+- Google Vertex AI
+
+Bancos Vetoriais:
+- Pinecone
+- Weaviate
+- ChromaDB
+
+---
+
+[EXPERIENCIA_VIA_VAREJO]
+
+Cargo: Senior QA
+Período: 2019 - 2026
+
+Contexto:
+Atuação como responsável pela estratégia de qualidade, implementação de shift-left e construção de frameworks de automação integrados ao CI/CD.
+
+Entregas de Valor:
+- Eliminação completa do backlog de testes manuais de API em 90 dias
+- Implementação de 800 cenários automatizados executados 3 vezes ao dia
+- Redução de aproximadamente 70% no tempo de feedback para o time
+- Transição de deploys quinzenais para deploys diários
+- Redução significativa de bugs em produção
+
+Impacto:
+Aumento da velocidade de entrega com alta confiabilidade, permitindo decisões rápidas e redução de retrabalho.
+
+Tecnologias usadas:
+- Capibara, Cypress, Cucumber, Robot, SQL, MongoDB, Git, Postman, SoapUI, Kafka, Jenkins, JMeter, K6, Grafana, Dynatrace
+
+Frameworks Ageis:
+- Scrum, Kanban
+
+Atividades:
+- Testes Manuais com levantamento de requisitos
+- Escrita de cenários em BDD
+- Construção de testes automatizados E2E e APIs
+- Teste de performance e carga
+- Implementação de estratégia Gitflow e configuração de GitHub Actions
+- Gerenciamento de testes com Zephyr
+
+---
+
+[EXPERIENCIA_SUPERDIGITAL]
+
+Foco: Integridade de Dados e Compliance
+Período: 2021 - 2024
+
+Contexto:
+Responsável pela qualidade de dados contábeis em ambiente multi-país com alto volume de transações.
+
+Entregas de Valor:
+- Automação de 112 relatórios críticos com 100% de cobertura
+- Validação linha a linha de transações financeiras em 5 países
+- Eliminação total de validação manual por amostragem
+- Redução de risco de multas fiscais e inconsistências contábeis
+- Criação de monitoramento contínuo da saúde dos dados
+
+Impacto:
+Garantia de conformidade internacional e confiabilidade total dos dados financeiros, reduzindo riscos operacionais críticos.
+
+Tecnologias usadas:
+- Cypress, Databricks, Azure DevOps, Azure Data Lake
+
+Frameworks Ageis:
+- Kanban
+
+Atividades:
+- Testes Manuais
+- Escrita de cenários em BDD
+- Construção de testes automatizados para validação de dados
+- Monitoria de processamento de dados
+- Gerenciamento de testes com Azure Test Plan
+
+---
+
+[EXPERIENCIA_HONDA]
+
+Foco: Carro Conectado / IoT
+Período: 2024 - 2026
+
+Contexto:
+Automação de testes para ecossistema mobile conectado a hardware automotivo.
+
+Entregas de Valor:
+- Automação de 90% dos fluxos críticos do sistema
+- Redução do ciclo de regressão de 5 dias para 4 horas
+- Execução escalável em múltiplos dispositivos via Device Farm
+- Aumento significativo da cobertura E2E mobile
+
+Impacto:
+Aceleração do time-to-market e aumento da qualidade em aplicações críticas de IoT.
+
+Tecnologias usadas:
+- Robot, Xcode, Appium, Android SDK, GitLab, Rancher, DeviceFarm
+
+Frameworks Ageis:
+- Kanban
+
+Atividades:
+- Construção de testes automatizados em dispositivos moveis (Android/iOS)
+- Escrita de cenários em BDD
+- Gerenciamento de testes automatizados com Zephyr
+
+---
+
+[EXPERIENCIA_INMETRICS]
+
+Período: 2019
+
+Contexto:
+Atuação em sistemas de seguros com foco em regras de negócio complexas.
+
+Entregas de Valor:
+- Implementação de BDD para alinhamento entre negócio e tecnologia
+- Automação de fluxos críticos de cálculo e emissão
+- Eliminação de erros humanos em processos repetitivos
+- Garantia de consistência nas regras de negócio
+
+Impacto:
+Redução de retrabalho e aumento da confiabilidade em sistemas financeiros sensíveis.
+
+Tecnologias usadas:
+- Ruby, Capibara, Appium, GitHub
+
+Frameworks Ageis:
+- Kanban, Scrum
+
+Atividades:
+- Testes Manuais com levantamento de requisitos
+- Escrita de cenários em BDD
+- Construção de testes automatizados E2E
+
+---
+
+[EXPERIENCIA_FORD]
+
+Cargo: Tech Lead QA
+Período: 2026 - Atual
+
+Contexto:
+Liderança técnica na automação de integrações entre múltiplos ERPs e SAP.
+
+Entregas de Valor:
+- Redução do tempo de regressão de 3 dias para menos de 15 minutos
+- Automação centralizada para 6 ecossistemas de ERP
+- Validação de integridade de dados ponta a ponta (API + banco)
+- Aumento da confiabilidade das integrações com SAP
+
+Impacto:
+Escalabilidade operacional e segurança em processos críticos de negócio.
+
+Tecnologias usadas:
+- Rest Assured, Java, Google Cloud SDK, Hoppscotch, GitHub
+
+Frameworks Ageis:
+- Kanban
+
+Atividades:
+- Testes Manuais com levantamento de requisitos
+- Escrita de cenários em BDD
+- Construção de testes automatizados em APIs
+
+---
+
+[EXPERIENCIA_DS_PLUS]
+
+Cargo: Desenvolvedor Java
+Período: 2015 - 2018
+
+Contexto:
+Desenvolvimento de sistema para controle de reparos e logística reversa.
+
+Entregas de Valor:
+- Redução de 70% no tempo de processamento de entrada e saída
+- Eliminação total de erros manuais em conferência de dados
+- Digitalização completa da operação
+- Implementação de rastreabilidade total de dispositivos
+
+Impacto:
+Transformação digital do processo operacional com ganho expressivo de eficiência e controle.
+
+Tecnologias usadas:
+- Java (Core & SE), MySQL, Selenium, GitHub
+
+Frameworks Ageis:
+- Kanban
+
+Atividades:
+- Levantamento de requisitos
+- desenvolvimento da camada de dados e CRUD
+- desenvolvimento da funcionalidade de busca de listas, exportação para planilhas Excel,
+- desenvolvimento de gestão de notas fiscais e estoque
+- desenvolvimento de gerenciamento relatorios e produção
+
+---
+
+[FORMACAO]
+
+Graduação: Análise e Desenvolvimento de Sistemas
+Instituição: UNIABC - 2012
+
+MBA: AI Engineering e Multi-Agents
+Instituição: FIAP - previsão 2026
+
+---
+
+[IDIOMAS]
+
+Inglês:
+Nível: A1
+Meta: B2 até 2026
+
+---
+
+[LIDERANCA]
+
+- Mentoria técnica
+- Code review
+- Cultura de qualidade
+- Evolução do time
+- Compartilhamento de conhecimento
+
+---
+
+[RAG_INDEXACAO]
+
+Domínios principais:
+- QA Automation
+- Engenharia de IA
+- Testes de API
+- Mobile
+- Performance
+- Dados
+- Cloud
+
+Casos de uso:
+- Entrevistas técnicas
+- Recrutamento
+- Agente inteligente
+- Assistente de carreira
