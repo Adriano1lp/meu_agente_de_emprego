@@ -30,6 +30,7 @@ OPENAI_EMBEDDING_MODEL = os.getenv(
 
 APP_NAME = os.getenv("APP_NAME", "Analista de Vagas API").strip()
 APP_VERSION = os.getenv("APP_VERSION", "1.0.0").strip()
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower() or "development"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 AUTH_MODE = os.getenv("AUTH_MODE", "jwt").strip().lower() or "jwt"
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me").strip()
@@ -116,3 +117,21 @@ def ensure_openai_api_key() -> str:
             "antes de iniciar a API."
         )
     return OPENAI_API_KEY
+
+
+def ensure_runtime_config() -> None:
+    is_production = ENVIRONMENT in {"production", "prod"}
+
+    if not is_production:
+        return
+
+    if AUTH_MODE == "jwt" and JWT_SECRET == "dev-secret-change-me":
+        raise RuntimeError(
+            "JWT_SECRET insegura em producao. Defina uma chave forte antes de iniciar a API."
+        )
+
+    if not CORS_ALLOW_ORIGINS or CORS_ALLOW_ORIGINS == ["*"]:
+        raise RuntimeError(
+            "CORS_ALLOW_ORIGINS nao pode ser '*' em producao. "
+            "Defina explicitamente o dominio do app."
+        )

@@ -16,6 +16,7 @@ from config import (
     AUTH_MODE,
     CORS_ALLOW_ORIGINS,
     PUBLIC_BASE_URL,
+    ensure_runtime_config,
     get_user_chroma_dir,
     get_user_cv_file,
     get_user_output_dir,
@@ -25,6 +26,8 @@ from services.main_curriculo import gerar_pdf_profissional
 from services.main_rag import rebuild_vectorstore_for_user
 from services.auth_users import authenticate_user, get_user_by_id, register_user
 from services.user_data import get_user_profile, save_user_cv, save_user_profile
+
+ensure_runtime_config()
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
