@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
+from fastapi import HTTPException
 from langchain_chroma import Chroma
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -9,10 +8,10 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from pydantic import BaseModel, Field
 
 from config import (
-    CHROMA_DB_DIR,
-    CV_FILE,
     OPENAI_CHAT_MODEL,
     OPENAI_EMBEDDING_MODEL,
+    get_user_chroma_dir,
+    get_user_cv_file,
     ensure_openai_api_key,
 )
 
@@ -207,12 +206,13 @@ prompt_curriculo_otimizado = PromptTemplate(
         - Use linguagem objetiva e profissional.
         - Evite redundancia.
         - Nao invente experiencias.
+        - Preencha os [...] com informacoes reais do candidato.
 
         FORMATO: (MANTENHA OS ATERISCOS PARA DEIXAR O TESTO EM NEGRITO)
-        **Adriano Lima Pereira**
-        **Cargo**
+        **[NOME COMPLETO]**
+        **[CARGO]**
 
-        adrianolpereira@gmail.com | (11) 966394923 | linkedin.com/in/adriano-lima-76764085/
+        [EMAIL] | [TELEFONE] | [LINKEDIN]
 
         ---
 
@@ -224,25 +224,25 @@ prompt_curriculo_otimizado = PromptTemplate(
         **Experiencia Profissional**
 
         **Cargo**
-        **[EXPERIENCIA_VIA_VAREJO]** | 2020 - 2026
+        **[EXPERIENCIA 1]** | [INICIO] - [FIM]
         - Entrega de valor com impacto mensuravel
         - Tecnologias utilizadas
         - Resultado alcancado
 
         **Cargo**
-        **[EXPERIENCIA_SUPERDIGITAL]** | 2021 - 2023
+        **[EXPERIENCIA 2]** | [INICIO] - [FIM]
         - Entrega de valor com impacto mensuravel
         - Tecnologias utilizadas
         - Resultado alcancado
 
         **Cargo**
-        **[EXPERIENCIA_INMETRICS]** | 2019 - 2019
+        **[EXPERIENCIA 3]** | [INICIO] - [FIM]
         - Entrega de valor com impacto mensuravel
         - Tecnologias utilizadas
         - Resultado alcancado
 
         **Cargo**
-        **[EXPERIENCIA_DS_PLUS]** | 2015 - 2018
+        **[EXPERIENCIA 4]** | [INICIO] - [FIM]
         - Entrega de valor com impacto mensuravel
         - Tecnologias utilizadas
         - Resultado alcancado
@@ -257,16 +257,16 @@ prompt_curriculo_otimizado = PromptTemplate(
         ---
 
         **Formacao Academica**
-        **MBA AI Engineering e Multi-Agents**
-        FIAP | previsao 2026
+        **[FORMACAO ACADEMICA 1]**
+        [INSTITUICAO] | [FINALIZACAO]
 
-        **Analise e Desenvolvimento de Sistemas**
-        UNIABC | 2012
+        **[FORMACAO ACADEMICA 2]**
+        [INSTITUICAO] | [FINALIZACAO]
 
         ---
 
         **Idiomas**
-        Idioma: Ingles - A1
+        Idioma: [IDIOMA E NIVEL]
 
         ---
 
@@ -320,20 +320,10 @@ embeddings = OpenAIEmbeddings(
     api_key=OPENAI_API_KEY,
 )
 
-vectorstore = Chroma(
-    persist_directory=str(CHROMA_DB_DIR),
-    embedding_function=embeddings,
-)
-
 llm_openai = ChatOpenAI(
     model_name=OPENAI_CHAT_MODEL,
     temperature=0.5,
     openai_api_key=OPENAI_API_KEY,
-)
-
-retriever = vectorstore.as_retriever(
-    search_type="similarity",
-    search_kwargs={"k": 6},
 )
 
 cadeia_1 = prompt_analizar_vaga | llm_openai | parseador_vaga
@@ -343,8 +333,8 @@ cadeia_4 = prompt_curriculo_otimizado | llm_openai | StrOutputParser()
 cadeia_resposta = prompt_resposta_usuario | llm_openai | StrOutputParser()
 
 
-def pipeline(vaga_texto: str) -> tuple[str, str]:
-    contexto = _load_candidate_context(vaga_texto)
+def pipeline(vaga_texto: str, user_id: str) -> tuple[str, str]:
+    contexto = _load_candidate_context(vaga_texto, user_id)
 
     vaga_struct = cadeia_1.invoke({"vaga": vaga_texto})
     matching = cadeia_2.invoke({"contexto": contexto, "vaga": vaga_struct})
@@ -363,8 +353,18 @@ def pipeline(vaga_texto: str) -> tuple[str, str]:
     return curriculo, resposta_usuario
 
 
-def _load_candidate_context(vaga_texto: str) -> str:
+def _load_candidate_context(vaga_texto: str, user_id: str) -> str:
     context_parts: list[str] = []
+    retriever = _build_user_retriever(user_id)
+
+    if retriever is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Embeddings do usuario nao encontrados. "
+                "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
+            ),
+        )
 
     try:
         contexto_docs = retriever.invoke(vaga_texto)
@@ -376,22 +376,40 @@ def _load_candidate_context(vaga_texto: str) -> str:
         if content:
             context_parts.append(content)
 
-    cv_text = _read_cv_file()
+    cv_text = _read_cv_file(user_id)
     if cv_text:
         context_parts.append(cv_text)
 
     contexto = "\n\n".join(dict.fromkeys(context_parts)).strip()
     if not contexto:
-        raise RuntimeError(
-            "Nao foi possivel carregar o contexto do candidato. "
-            "Verifique api/documents/cv.txt e rode python rebuild_vectorstore.py."
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nao foi possivel carregar o contexto do candidato para este usuario. "
+                "Verifique o upload do curriculo e regenere os embeddings."
+            ),
         )
 
     return contexto
 
 
-def _read_cv_file() -> str:
-    cv_path = Path(CV_FILE)
+def _build_user_retriever(user_id: str):
+    chroma_dir = get_user_chroma_dir(user_id)
+    if not chroma_dir.exists() or not any(chroma_dir.iterdir()):
+        return None
+
+    vectorstore = Chroma(
+        persist_directory=str(chroma_dir),
+        embedding_function=embeddings,
+    )
+    return vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": 6},
+    )
+
+
+def _read_cv_file(user_id: str) -> str:
+    cv_path = get_user_cv_file(user_id)
     if not cv_path.exists():
         return ""
 

@@ -1,6 +1,8 @@
 fastapi
 uvicorn[standard]
 python-dotenv
+python-multipart
+pypdf
 reportlab
 langchain-core
 langchain-openai
