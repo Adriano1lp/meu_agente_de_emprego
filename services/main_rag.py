@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
-from langchain_community.document_loaders import TextLoader
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -17,6 +17,7 @@ from config import (
     get_default_user_cv_file,
     get_user_chroma_dir,
     get_user_cv_file,
+    get_user_documents_dir,
     ensure_openai_api_key,
 )
 
@@ -24,32 +25,32 @@ OPENAI_API_KEY = ensure_openai_api_key()
 
 
 def rebuild_vectorstore_for_user(user_id: str) -> dict[str, Any]:
-    cv_file = get_user_cv_file(user_id)
-    if not cv_file.exists():
+    cv_file = _get_existing_user_cv_file(user_id)
+    if cv_file is None:
         raise HTTPException(
             status_code=400,
             detail=(
                 "Curriculo do usuario nao encontrado. "
-                "Envie o arquivo antes de gerar embeddings."
+                "Envie um arquivo .txt ou .pdf antes de gerar embeddings."
             ),
         )
 
     chroma_dir = get_user_chroma_dir(user_id)
-    _reset_directory(chroma_dir)
 
-    embeddings = OpenAIEmbeddings(
-        model=OPENAI_EMBEDDING_MODEL,
-        openai_api_key=OPENAI_API_KEY,
-    )
-
-    loader = TextLoader(str(cv_file), encoding="utf-8")
-    documentos = loader.load()
+    documentos = _load_cv_documents(cv_file)
     txt_chunks = _split_documents(documentos, cv_file)
     if not txt_chunks:
         raise HTTPException(
             status_code=400,
             detail="Nao foi possivel gerar chunks validos para o curriculo enviado",
         )
+
+    _reset_directory(chroma_dir)
+
+    embeddings = OpenAIEmbeddings(
+        model=OPENAI_EMBEDDING_MODEL,
+        openai_api_key=OPENAI_API_KEY,
+    )
 
     Chroma.from_documents(
         txt_chunks,
@@ -78,16 +79,17 @@ def rebuild_vectorstore_legacy(cv_file: Path, chroma_dir: Path) -> dict[str, Any
     if not cv_file.exists():
         raise FileNotFoundError(f"Arquivo de curriculo nao encontrado em: {cv_file}")
 
+    documentos = _load_cv_documents(cv_file)
+    txt_chunks = _split_documents(documentos, cv_file)
+    if not txt_chunks:
+        raise ValueError("Nao foi possivel gerar chunks validos para o curriculo")
+
     _reset_directory(chroma_dir)
 
     embeddings = OpenAIEmbeddings(
         model=OPENAI_EMBEDDING_MODEL,
         openai_api_key=OPENAI_API_KEY,
     )
-
-    loader = TextLoader(str(cv_file), encoding="utf-8")
-    documentos = loader.load()
-    txt_chunks = _split_documents(documentos, cv_file)
 
     Chroma.from_documents(
         txt_chunks,
@@ -102,6 +104,35 @@ def rebuild_vectorstore_legacy(cv_file: Path, chroma_dir: Path) -> dict[str, Any
         "chroma_dir": str(chroma_dir),
         "cv_file": str(cv_file),
     }
+
+
+def _get_existing_user_cv_file(user_id: str) -> Path | None:
+    cv_file = get_user_cv_file(user_id)
+    if cv_file.exists():
+        return cv_file
+
+    documents_dir = get_user_documents_dir(user_id)
+    for filename in ("cv.pdf", "cv_original.pdf", "cv_original.txt"):
+        candidate = documents_dir / filename
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def _load_cv_documents(cv_file: Path) -> list[Any]:
+    file_extension = cv_file.suffix.lower()
+
+    if file_extension == ".txt":
+        return TextLoader(str(cv_file), encoding="utf-8").load()
+
+    if file_extension == ".pdf":
+        return PyPDFLoader(str(cv_file)).load()
+
+    raise HTTPException(
+        status_code=400,
+        detail="Formato de curriculo nao suportado. Envie um arquivo .txt ou .pdf",
+    )
 
 
 def _split_documents(documentos: list[Any], cv_file: Path) -> list[Any]:

@@ -184,7 +184,7 @@ Bancos Vetoriais:
 [EXPERIENCIA_VIA_VAREJO]
 
 Cargo: Senior QA
-Período: 2019 - 2026
+Período: 2023 - 2026
 
 Contexto:
 Atuação como responsável pela estratégia de qualidade, implementação de shift-left e construção de frameworks de automação integrados ao CI/CD.
@@ -212,13 +212,15 @@ Atividades:
 - Teste de performance e carga
 - Implementação de estratégia Gitflow e configuração de GitHub Actions
 - Gerenciamento de testes com Zephyr
+- Construção de testes automatizados em dispositivos moveis (Android/iOS)
+
 
 ---
 
 [EXPERIENCIA_SUPERDIGITAL]
 
 Foco: Integridade de Dados e Compliance
-Período: 2021 - 2024
+Período: 2021 - 2023
 
 Contexto:
 Responsável pela qualidade de dados contábeis em ambiente multi-país com alto volume de transações.
@@ -248,39 +250,9 @@ Atividades:
 
 ---
 
-[EXPERIENCIA_HONDA]
-
-Foco: Carro Conectado / IoT
-Período: 2024 - 2026
-
-Contexto:
-Automação de testes para ecossistema mobile conectado a hardware automotivo.
-
-Entregas de Valor:
-- Automação de 90% dos fluxos críticos do sistema
-- Redução do ciclo de regressão de 5 dias para 4 horas
-- Execução escalável em múltiplos dispositivos via Device Farm
-- Aumento significativo da cobertura E2E mobile
-
-Impacto:
-Aceleração do time-to-market e aumento da qualidade em aplicações críticas de IoT.
-
-Tecnologias usadas:
-- Robot, Xcode, Appium, Android SDK, GitLab, Rancher, DeviceFarm
-
-Frameworks Ageis:
-- Kanban
-
-Atividades:
-- Construção de testes automatizados em dispositivos moveis (Android/iOS)
-- Escrita de cenários em BDD
-- Gerenciamento de testes automatizados com Zephyr
-
----
-
 [EXPERIENCIA_INMETRICS]
 
-Período: 2019
+Período: 2019 - 2021
 
 Contexto:
 Atuação em sistemas de seguros com foco em regras de negócio complexas.
@@ -290,12 +262,17 @@ Entregas de Valor:
 - Automação de fluxos críticos de cálculo e emissão
 - Eliminação de erros humanos em processos repetitivos
 - Garantia de consistência nas regras de negócio
+- Automação de 90% dos fluxos críticos do sistema
+- Redução do ciclo de regressão de 5 dias para 4 horas
+- Execução escalável em múltiplos dispositivos via Device Farm
+- Aumento significativo da cobertura E2E mobile
 
 Impacto:
 Redução de retrabalho e aumento da confiabilidade em sistemas financeiros sensíveis.
+Aceleração do time-to-market e aumento da qualidade em aplicações críticas de IoT.
 
 Tecnologias usadas:
-- Ruby, Capibara, Appium, GitHub
+- Ruby, Capibara, Appium, GitHub, Robot, Xcode, Android SDK, GitLab, Rancher, DeviceFarm
 
 Frameworks Ageis:
 - Kanban, Scrum
@@ -304,6 +281,8 @@ Atividades:
 - Testes Manuais com levantamento de requisitos
 - Escrita de cenários em BDD
 - Construção de testes automatizados E2E
+- Construção de testes automatizados em dispositivos moveis (Android/iOS)
+- Gerenciamento de testes automatizados com Zephyr
 
 ---
 
