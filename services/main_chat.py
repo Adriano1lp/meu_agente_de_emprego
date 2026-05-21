@@ -315,6 +315,45 @@ prompt_resposta_usuario = PromptTemplate(
     input_variables=["vaga", "matching"],
 )
 
+prompt_carta_apresentacao = PromptTemplate(
+    template="""
+        Voce e um especialista em carreira e cartas de apresentacao.
+
+        Entradas:
+        - Dados do candidato {contexto}
+        - Empresa alvo {empresa}
+
+        Objetivo:
+        Criar uma carta de apresentacao profissional, objetiva e aderente ao perfil do candidato.
+
+        Regras:
+        - Escreva em primeira pessoa.
+        - Use apenas informacoes presentes no contexto do candidato.
+        - Nao invente cargos, empresas, metricas, formacoes ou tecnologias.
+        - Mencione a empresa alvo de forma natural.
+        - Use tom profissional, direto e confiante.
+        - Nao use markdown.
+        - Nao inclua explicacoes fora da carta.
+
+        Estrutura:
+        [Cidade], [data atual]
+
+        Prezados recrutadores da {empresa},
+
+        [Abertura com interesse pela empresa]
+
+        [Resumo profissional baseado no contexto]
+
+        [Pontos fortes e contribuicoes possiveis]
+
+        [Fechamento com disponibilidade]
+
+        Atenciosamente,
+        [Nome do candidato quando disponivel]
+    """,
+    input_variables=["contexto", "empresa"],
+)
+
 embeddings = OpenAIEmbeddings(
     model=OPENAI_EMBEDDING_MODEL,
     api_key=OPENAI_API_KEY,
@@ -331,9 +370,15 @@ cadeia_2 = prompt_matching | llm_openai | parseador_matching
 cadeia_3 = prompt_otimizacao | llm_openai | parseador_otimizacao
 cadeia_4 = prompt_curriculo_otimizado | llm_openai | StrOutputParser()
 cadeia_resposta = prompt_resposta_usuario | llm_openai | StrOutputParser()
+cadeia_carta_apresentacao = prompt_carta_apresentacao | llm_openai | StrOutputParser()
 
 
 def pipeline(vaga_texto: str, user_id: str) -> tuple[str, str]:
+    result = pipeline_with_details(vaga_texto, user_id)
+    return result["curriculo"], result["resposta_usuario"]
+
+
+def pipeline_with_details(vaga_texto: str, user_id: str) -> dict[str, object]:
     contexto = _load_candidate_context(vaga_texto, user_id)
 
     vaga_struct = cadeia_1.invoke({"vaga": vaga_texto})
@@ -350,7 +395,27 @@ def pipeline(vaga_texto: str, user_id: str) -> tuple[str, str]:
         },
     )
 
-    return curriculo, resposta_usuario
+    return {
+        "curriculo": curriculo,
+        "resposta_usuario": resposta_usuario,
+        "vaga": vaga_struct,
+        "matching": matching,
+        "otimizacao": otimizacao,
+    }
+
+
+def generate_cover_letter(company_name: str, user_id: str) -> str:
+    empresa = company_name.strip()
+    if not empresa:
+        raise HTTPException(status_code=400, detail="Nome da empresa nao pode ser vazio")
+
+    contexto = _load_candidate_context(empresa, user_id)
+    return cadeia_carta_apresentacao.invoke(
+        {
+            "contexto": contexto,
+            "empresa": empresa,
+        },
+    )
 
 
 def _load_candidate_context(vaga_texto: str, user_id: str) -> str:

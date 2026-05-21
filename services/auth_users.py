@@ -3,14 +3,19 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import os
+import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
 
-from config import AUTH_USERS_FILE, sanitize_user_id
+from config import sanitize_user_id
+from database.repository import (
+    create_user,
+    get_user_by_email,
+    get_user_by_id as find_user_by_id,
+)
 
 PBKDF2_ITERATIONS = 200_000
 
@@ -28,13 +33,12 @@ def register_user(
 
     _validate_password(password)
 
-    users = _load_users()
-    if normalized_email in users:
+    if get_user_by_email(normalized_email):
         raise HTTPException(status_code=409, detail="Email ja cadastrado")
 
     user_id = _build_user_id(normalized_email)
     now = _utc_now_iso()
-    users[normalized_email] = {
+    user = {
         "user_id": user_id,
         "email": normalized_email,
         "display_name": display_name,
@@ -42,15 +46,17 @@ def register_user(
         "created_at": now,
         "updated_at": now,
     }
-    _save_users(users)
+    try:
+        create_user(user)
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Email ja cadastrado") from exc
 
-    return _public_user(users[normalized_email])
+    return _public_user(user)
 
 
 def authenticate_user(email: str, password: str) -> dict[str, Any]:
     normalized_email = _normalize_email(email)
-    users = _load_users()
-    user = users.get(normalized_email)
+    user = get_user_by_email(normalized_email)
     if not user or not _verify_password(password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Email ou senha invalidos")
 
@@ -59,10 +65,8 @@ def authenticate_user(email: str, password: str) -> dict[str, Any]:
 
 def get_user_by_id(user_id: str) -> dict[str, Any] | None:
     safe_user_id = sanitize_user_id(user_id)
-    for user in _load_users().values():
-        if user.get("user_id") == safe_user_id:
-            return _public_user(user)
-    return None
+    user = find_user_by_id(safe_user_id)
+    return _public_user(user) if user else None
 
 
 def _normalize_email(email: str) -> str:
@@ -118,32 +122,6 @@ def _verify_password(password: str, password_hash: str) -> bool:
         iterations,
     )
     return hmac.compare_digest(computed_digest, expected_digest)
-
-
-def _load_users() -> dict[str, dict[str, Any]]:
-    if not AUTH_USERS_FILE.exists():
-        return {}
-
-    try:
-        data = json.loads(AUTH_USERS_FILE.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="Base de usuarios invalida") from exc
-
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=500, detail="Base de usuarios invalida")
-
-    return {
-        str(email): record
-        for email, record in data.items()
-        if isinstance(record, dict)
-    }
-
-
-def _save_users(users: dict[str, dict[str, Any]]) -> None:
-    AUTH_USERS_FILE.write_text(
-        json.dumps(users, ensure_ascii=True, indent=2),
-        encoding="utf-8",
-    )
 
 
 def _public_user(user: dict[str, Any]) -> dict[str, Any]:

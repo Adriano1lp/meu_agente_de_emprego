@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,11 @@ from config import (
     get_user_documents_dir,
     get_user_profile_file,
     get_user_profile_versions_file,
+)
+from database.repository import (
+    create_user_document,
+    get_user_profile as get_persisted_user_profile,
+    upsert_user_profile,
 )
 
 ALLOWED_CV_EXTENSIONS = {".txt", ".pdf"}
@@ -54,8 +60,22 @@ def save_user_cv(upload_file: UploadFile, user_id: str) -> dict[str, Any]:
     cv_file.write_text(cv_text, encoding="utf-8")
 
     updated_at = _utc_now_iso()
+    document_id = create_user_document(
+        {
+            "user_id": user_id,
+            "document_type": "cv",
+            "original_filename": upload_file.filename or original_file_path.name,
+            "original_content_type": upload_file.content_type or "application/octet-stream",
+            "original_file_path": str(original_file_path),
+            "extracted_text_path": str(cv_file),
+            "bytes_received": file_size,
+            "checksum_sha256": hashlib.sha256(file_bytes).hexdigest(),
+        },
+    )
+
     return {
         "user_id": user_id,
+        "document_id": document_id,
         "filename": upload_file.filename or cv_file.name,
         "content_type": upload_file.content_type or "application/octet-stream",
         "bytes_received": file_size,
@@ -66,6 +86,10 @@ def save_user_cv(upload_file: UploadFile, user_id: str) -> dict[str, Any]:
 
 
 def get_user_profile(user_id: str) -> dict[str, Any] | None:
+    persisted_profile = get_persisted_user_profile(user_id)
+    if persisted_profile:
+        return persisted_profile
+
     profile_file = get_user_profile_file(user_id)
     if not profile_file.exists():
         return None
@@ -95,6 +119,8 @@ def save_user_profile(profile_data: dict[str, Any], user_id: str) -> dict[str, A
     )
     with versions_file.open("a", encoding="utf-8") as history:
         history.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+    upsert_user_profile(user_id, next_version, profile_data)
 
     return payload
 

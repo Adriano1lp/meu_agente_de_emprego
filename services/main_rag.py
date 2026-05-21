@@ -20,6 +20,7 @@ from config import (
     get_user_documents_dir,
     ensure_openai_api_key,
 )
+from database.repository import create_embedding_run, get_latest_user_document_id
 
 OPENAI_API_KEY = ensure_openai_api_key()
 
@@ -36,32 +37,65 @@ def rebuild_vectorstore_for_user(user_id: str) -> dict[str, Any]:
         )
 
     chroma_dir = get_user_chroma_dir(user_id)
+    document_id = get_latest_user_document_id(user_id)
 
-    documentos = _load_cv_documents(cv_file)
-    txt_chunks = _split_documents(documentos, cv_file)
-    if not txt_chunks:
-        raise HTTPException(
-            status_code=400,
-            detail="Nao foi possivel gerar chunks validos para o curriculo enviado",
+    try:
+        documentos = _load_cv_documents(cv_file)
+        txt_chunks = _split_documents(documentos, cv_file)
+        if not txt_chunks:
+            raise HTTPException(
+                status_code=400,
+                detail="Nao foi possivel gerar chunks validos para o curriculo enviado",
+            )
+
+        _reset_directory(chroma_dir)
+
+        embeddings = OpenAIEmbeddings(
+            model=OPENAI_EMBEDDING_MODEL,
+            openai_api_key=OPENAI_API_KEY,
         )
 
-    _reset_directory(chroma_dir)
+        Chroma.from_documents(
+            txt_chunks,
+            embedding=embeddings,
+            persist_directory=str(chroma_dir),
+        )
+    except Exception as exc:
+        create_embedding_run(
+            {
+                "user_id": user_id,
+                "document_id": document_id,
+                "embedding_model": OPENAI_EMBEDDING_MODEL,
+                "chunks": 0,
+                "chroma_dir": str(chroma_dir),
+                "cv_file_path": str(cv_file),
+                "status": "failed",
+                "error_message": str(exc),
+                "processed_at": _utc_now_iso(),
+            },
+        )
+        raise
 
-    embeddings = OpenAIEmbeddings(
-        model=OPENAI_EMBEDDING_MODEL,
-        openai_api_key=OPENAI_API_KEY,
-    )
-
-    Chroma.from_documents(
-        txt_chunks,
-        embedding=embeddings,
-        persist_directory=str(chroma_dir),
+    processed_at = _utc_now_iso()
+    embedding_run_id = create_embedding_run(
+        {
+            "user_id": user_id,
+            "document_id": document_id,
+            "embedding_model": OPENAI_EMBEDDING_MODEL,
+            "chunks": len(txt_chunks),
+            "chroma_dir": str(chroma_dir),
+            "cv_file_path": str(cv_file),
+            "status": "completed",
+            "error_message": None,
+            "processed_at": processed_at,
+        },
     )
 
     return {
         "user_id": user_id,
+        "embedding_run_id": embedding_run_id,
         "chunks": len(txt_chunks),
-        "processed_at": _utc_now_iso(),
+        "processed_at": processed_at,
         "embedding_model": OPENAI_EMBEDDING_MODEL,
         "chroma_dir": str(chroma_dir),
         "cv_file": str(cv_file),

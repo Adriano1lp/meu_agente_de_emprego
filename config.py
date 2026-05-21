@@ -6,13 +6,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
 BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 LEGACY_DOCUMENTS_DIR = BASE_DIR / "documents"
 LEGACY_OUTPUT_DIR = BASE_DIR / "outputs"
 LEGACY_CHROMA_DB_DIR = BASE_DIR / "chroma_cv_db"
 STORAGE_DIR = Path(os.getenv("STORAGE_DIR", str(BASE_DIR / "storage"))).resolve()
+DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(STORAGE_DIR / "app.db"))).resolve()
 USERS_DIR = STORAGE_DIR / "users"
 DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID", "default").strip() or "default"
 

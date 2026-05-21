@@ -284,6 +284,8 @@ O historico de versoes fica em:
 
 Tambem sao aceitos campos extras, porque o model atual esta com `extra="allow"`.
 
+Payloads vazios ou sem conteudo util sao rejeitados com status `400` e mensagem `Perfil nao pode ser vazio`.
+
 ### Exemplo
 
 ```bash

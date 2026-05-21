@@ -21,7 +21,13 @@ from config import (
     get_user_cv_file,
     get_user_output_dir,
 )
-from services.main_chat import pipeline
+from database.repository import (
+    count_generated_files,
+    create_generated_file,
+    create_processing_run,
+)
+from services.main_chat import generate_cover_letter, pipeline_with_details
+from services.main_carta import gerar_pdf_carta_apresentacao
 from services.main_curriculo import gerar_pdf_profissional
 from services.main_rag import rebuild_vectorstore_for_user
 from services.auth_users import authenticate_user, get_user_by_id, register_user
@@ -44,6 +50,10 @@ class RequestData(BaseModel):
     texto: str
 
 
+class CoverLetterRequest(BaseModel):
+    empresa: str
+
+
 class UserProfileRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -58,6 +68,25 @@ class UserProfileRequest(BaseModel):
     objetivos: list[str] = Field(default_factory=list)
     experiencias: list[str] = Field(default_factory=list)
     formacao: list[str] = Field(default_factory=list)
+
+
+def _has_profile_content(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+
+    return value is not None
+
+
+def _build_profile_payload(profile: UserProfileRequest) -> dict[str, Any]:
+    payload = profile.model_dump(exclude_none=True, exclude_unset=True)
+    return {
+        field: value
+        for field, value in payload.items()
+        if _has_profile_content(value)
+    }
 
 
 class AuthRegisterRequest(BaseModel):
@@ -169,7 +198,7 @@ def upsert_profile(
     profile: UserProfileRequest,
     user_id: str = Depends(get_current_user_id),
 ) -> dict[str, Any]:
-    profile_payload = profile.model_dump(exclude_none=True)
+    profile_payload = _build_profile_payload(profile)
     if not profile_payload:
         raise HTTPException(status_code=400, detail="Perfil nao pode ser vazio")
 
@@ -205,7 +234,10 @@ def read_user_status(user_id: str = Depends(get_current_user_id)) -> dict[str, A
         "has_cv": cv_file.exists(),
         "has_profile": profile is not None,
         "has_embeddings": chroma_dir.exists() and any(chroma_dir.iterdir()),
-        "generated_files": len([item for item in output_dir.iterdir() if item.is_file()]),
+        "generated_files": max(
+            count_generated_files(user_id),
+            len([item for item in output_dir.iterdir() if item.is_file()]),
+        ),
     }
 
 
@@ -245,13 +277,39 @@ def processar(
         raise HTTPException(status_code=400, detail="Texto nao pode ser vazio")
 
     try:
-        curriculo_otimizado, resposta_usuario = pipeline(texto_entrada, user_id)
+        pipeline_result = pipeline_with_details(texto_entrada, user_id)
+        curriculo_otimizado = str(pipeline_result["curriculo"])
+        resposta_usuario = str(pipeline_result["resposta_usuario"])
 
         nome_arquivo = f"{uuid.uuid4()}.pdf"
         caminho_pdf = get_user_output_dir(user_id) / nome_arquivo
         gerar_pdf_profissional(curriculo_otimizado, str(caminho_pdf))
 
         pdf_url = _build_public_file_url(request, nome_arquivo)
+        processing_run_id = create_processing_run(
+            {
+                "user_id": user_id,
+                "input_text": texto_entrada,
+                "job_data": pipeline_result.get("vaga"),
+                "matching": pipeline_result.get("matching"),
+                "optimization": pipeline_result.get("otimizacao"),
+                "response_text": resposta_usuario,
+                "status": "completed",
+                "error_message": None,
+                "completed_at": _utc_now_iso(),
+            },
+        )
+        create_generated_file(
+            {
+                "user_id": user_id,
+                "processing_run_id": processing_run_id,
+                "file_name": nome_arquivo,
+                "file_path": str(caminho_pdf),
+                "public_url": pdf_url,
+                "media_type": "application/pdf",
+                "bytes_size": caminho_pdf.stat().st_size if caminho_pdf.exists() else None,
+            },
+        )
 
         return {
             "texto_resposta": resposta_usuario,
@@ -261,6 +319,86 @@ def processar(
     except HTTPException:
         raise
     except Exception as exc:
+        create_processing_run(
+            {
+                "user_id": user_id,
+                "input_text": texto_entrada,
+                "job_data": None,
+                "matching": None,
+                "optimization": None,
+                "response_text": None,
+                "status": "failed",
+                "error_message": str(exc),
+                "completed_at": _utc_now_iso(),
+            },
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/users/me/cover-letter")
+def generate_user_cover_letter(
+    payload: CoverLetterRequest,
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+) -> dict[str, str]:
+    empresa = payload.empresa.strip()
+    if not empresa:
+        raise HTTPException(status_code=400, detail="Nome da empresa nao pode ser vazio")
+
+    try:
+        carta = generate_cover_letter(empresa, user_id)
+
+        nome_arquivo = f"carta-apresentacao-{uuid.uuid4()}.pdf"
+        caminho_pdf = get_user_output_dir(user_id) / nome_arquivo
+        gerar_pdf_carta_apresentacao(carta, str(caminho_pdf))
+
+        pdf_url = _build_public_file_url(request, nome_arquivo)
+        processing_run_id = create_processing_run(
+            {
+                "user_id": user_id,
+                "input_text": f"Carta de apresentacao para {empresa}",
+                "job_data": {"empresa": empresa},
+                "matching": None,
+                "optimization": None,
+                "response_text": carta,
+                "status": "completed",
+                "error_message": None,
+                "completed_at": _utc_now_iso(),
+            },
+        )
+        create_generated_file(
+            {
+                "user_id": user_id,
+                "processing_run_id": processing_run_id,
+                "file_name": nome_arquivo,
+                "file_path": str(caminho_pdf),
+                "public_url": pdf_url,
+                "media_type": "application/pdf",
+                "bytes_size": caminho_pdf.stat().st_size if caminho_pdf.exists() else None,
+            },
+        )
+
+        return {
+            "texto_resposta": carta,
+            "pdf_url": pdf_url,
+            "user_id": user_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        create_processing_run(
+            {
+                "user_id": user_id,
+                "input_text": f"Carta de apresentacao para {empresa}",
+                "job_data": {"empresa": empresa},
+                "matching": None,
+                "optimization": None,
+                "response_text": None,
+                "status": "failed",
+                "error_message": str(exc),
+                "completed_at": _utc_now_iso(),
+            },
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -269,3 +407,9 @@ def _build_public_file_url(request: Request, file_name: str) -> str:
         return f"{PUBLIC_BASE_URL}/users/me/files/{file_name}"
 
     return str(request.url_for("download_user_file", file_name=file_name))
+
+
+def _utc_now_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
