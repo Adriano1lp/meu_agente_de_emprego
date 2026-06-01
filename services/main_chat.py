@@ -10,10 +10,12 @@ from pydantic import BaseModel, Field
 from config import (
     OPENAI_CHAT_MODEL,
     OPENAI_EMBEDDING_MODEL,
+    PERSISTENCE_BACKEND,
     get_user_chroma_dir,
     get_user_cv_file,
     ensure_openai_api_key,
 )
+from database.repository import find_similar_embedding_chunks, get_latest_user_cv_text
 
 OPENAI_API_KEY = ensure_openai_api_key()
 
@@ -420,26 +422,29 @@ def generate_cover_letter(company_name: str, user_id: str) -> str:
 
 def _load_candidate_context(vaga_texto: str, user_id: str) -> str:
     context_parts: list[str] = []
-    retriever = _build_user_retriever(user_id)
+    if _use_mongodb_embeddings():
+        context_parts.extend(_load_mongodb_candidate_context(vaga_texto, user_id))
+    else:
+        retriever = _build_user_retriever(user_id)
 
-    if retriever is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Embeddings do usuario nao encontrados. "
-                "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
-            ),
-        )
+        if retriever is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Embeddings do usuario nao encontrados. "
+                    "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
+                ),
+            )
 
-    try:
-        contexto_docs = retriever.invoke(vaga_texto)
-    except Exception:
-        contexto_docs = []
+        try:
+            contexto_docs = retriever.invoke(vaga_texto)
+        except Exception:
+            contexto_docs = []
 
-    for doc in contexto_docs:
-        content = getattr(doc, "page_content", "").strip()
-        if content:
-            context_parts.append(content)
+        for doc in contexto_docs:
+            content = getattr(doc, "page_content", "").strip()
+            if content:
+                context_parts.append(content)
 
     cv_text = _read_cv_file(user_id)
     if cv_text:
@@ -456,6 +461,29 @@ def _load_candidate_context(vaga_texto: str, user_id: str) -> str:
         )
 
     return contexto
+
+
+def _load_mongodb_candidate_context(vaga_texto: str, user_id: str) -> list[str]:
+    query_embedding = embeddings.embed_query(vaga_texto)
+    chunks = find_similar_embedding_chunks(
+        user_id=user_id,
+        query_embedding=query_embedding,
+        limit=6,
+    )
+    context_parts = [
+        str(chunk.get("page_content", "")).strip()
+        for chunk in chunks
+        if str(chunk.get("page_content", "")).strip()
+    ]
+    if not context_parts:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Embeddings do usuario nao encontrados. "
+                "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
+            ),
+        )
+    return context_parts
 
 
 def _build_user_retriever(user_id: str):
@@ -476,6 +504,10 @@ def _build_user_retriever(user_id: str):
 def _read_cv_file(user_id: str) -> str:
     cv_path = get_user_cv_file(user_id)
     if not cv_path.exists():
-        return ""
+        return get_latest_user_cv_text(user_id) or ""
 
     return cv_path.read_text(encoding="utf-8").strip()
+
+
+def _use_mongodb_embeddings() -> bool:
+    return PERSISTENCE_BACKEND == "mongodb"

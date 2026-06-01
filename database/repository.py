@@ -6,13 +6,18 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from config import DATABASE_PATH
+from config import DATABASE_PATH, PERSISTENCE_BACKEND
+from database import mongo_repository
 
 API_DIR = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = API_DIR / "database" / "schema.sql"
 
 
 def initialize_database(database_path: Path = DATABASE_PATH) -> Path:
+    if _use_mongodb():
+        mongo_repository.initialize_database()
+        return database_path.resolve()
+
     database_path = database_path.resolve()
     database_path.parent.mkdir(parents=True, exist_ok=True)
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
@@ -42,6 +47,10 @@ def _connect() -> Iterator[sqlite3.Connection]:
 
 
 def create_user(user: dict[str, Any]) -> None:
+    if _use_mongodb():
+        mongo_repository.create_user(user)
+        return
+
     with _connect() as connection:
         connection.execute(
             """
@@ -55,6 +64,10 @@ def create_user(user: dict[str, Any]) -> None:
 
 
 def ensure_user_exists(user_id: str) -> None:
+    if _use_mongodb():
+        mongo_repository.ensure_user_exists(user_id)
+        return
+
     with _connect() as connection:
         row = connection.execute(
             "SELECT user_id FROM users WHERE user_id = ?",
@@ -78,6 +91,9 @@ def ensure_user_exists(user_id: str) -> None:
 
 
 def get_user_by_email(email: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_user_by_email(email)
+
     with _connect() as connection:
         row = connection.execute(
             """
@@ -91,6 +107,9 @@ def get_user_by_email(email: str) -> dict[str, Any] | None:
 
 
 def get_user_by_id(user_id: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_user_by_id(user_id)
+
     with _connect() as connection:
         row = connection.execute(
             """
@@ -104,6 +123,10 @@ def get_user_by_id(user_id: str) -> dict[str, Any] | None:
 
 
 def upsert_user_profile(user_id: str, version: int, profile_data: dict[str, Any]) -> None:
+    if _use_mongodb():
+        mongo_repository.upsert_user_profile(user_id, version, profile_data)
+        return
+
     ensure_user_exists(user_id)
     profile_json = json.dumps(profile_data, ensure_ascii=True)
     fields = {
@@ -149,6 +172,9 @@ def upsert_user_profile(user_id: str, version: int, profile_data: dict[str, Any]
 
 
 def get_user_profile(user_id: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_user_profile(user_id)
+
     with _connect() as connection:
         row = connection.execute(
             """
@@ -169,7 +195,10 @@ def get_user_profile(user_id: str) -> dict[str, Any] | None:
     }
 
 
-def create_user_document(document: dict[str, Any]) -> int:
+def create_user_document(document: dict[str, Any]) -> int | str:
+    if _use_mongodb():
+        return mongo_repository.create_user_document(document)
+
     ensure_user_exists(document["user_id"])
     with _connect() as connection:
         cursor = connection.execute(
@@ -188,7 +217,10 @@ def create_user_document(document: dict[str, Any]) -> int:
         return int(cursor.lastrowid)
 
 
-def get_latest_user_document_id(user_id: str) -> int | None:
+def get_latest_user_document_id(user_id: str) -> int | str | None:
+    if _use_mongodb():
+        return mongo_repository.get_latest_user_document_id(user_id)
+
     with _connect() as connection:
         row = connection.execute(
             """
@@ -203,7 +235,17 @@ def get_latest_user_document_id(user_id: str) -> int | None:
         return int(row["document_id"]) if row else None
 
 
-def create_embedding_run(run: dict[str, Any]) -> int:
+def get_latest_user_cv_text(user_id: str) -> str | None:
+    if _use_mongodb():
+        return mongo_repository.get_latest_user_cv_text(user_id)
+
+    return None
+
+
+def create_embedding_run(run: dict[str, Any]) -> int | str:
+    if _use_mongodb():
+        return mongo_repository.create_embedding_run(run)
+
     ensure_user_exists(run["user_id"])
     with _connect() as connection:
         cursor = connection.execute(
@@ -222,7 +264,61 @@ def create_embedding_run(run: dict[str, Any]) -> int:
         return int(cursor.lastrowid)
 
 
-def create_processing_run(run: dict[str, Any]) -> int:
+def replace_embedding_chunks(
+    *,
+    user_id: str,
+    embedding_run_id: str,
+    embedding_model: str,
+    chunks: list[dict[str, Any]],
+) -> None:
+    if _use_mongodb():
+        mongo_repository.replace_embedding_chunks(
+            user_id=user_id,
+            embedding_run_id=embedding_run_id,
+            embedding_model=embedding_model,
+            chunks=chunks,
+        )
+        return
+
+
+def count_embedding_chunks(user_id: str) -> int:
+    if _use_mongodb():
+        return mongo_repository.count_embedding_chunks(user_id)
+
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT chunks
+            FROM embedding_runs
+            WHERE user_id = ? AND status = 'completed'
+            ORDER BY processed_at DESC, embedding_run_id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        return int(row["chunks"]) if row else 0
+
+
+def find_similar_embedding_chunks(
+    *,
+    user_id: str,
+    query_embedding: list[float],
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    if _use_mongodb():
+        return mongo_repository.find_similar_embedding_chunks(
+            user_id=user_id,
+            query_embedding=query_embedding,
+            limit=limit,
+        )
+
+    return []
+
+
+def create_processing_run(run: dict[str, Any]) -> int | str:
+    if _use_mongodb():
+        return mongo_repository.create_processing_run(run)
+
     ensure_user_exists(run["user_id"])
     payload = {
         **run,
@@ -247,7 +343,10 @@ def create_processing_run(run: dict[str, Any]) -> int:
         return int(cursor.lastrowid)
 
 
-def create_generated_file(file_data: dict[str, Any]) -> int:
+def create_generated_file(file_data: dict[str, Any]) -> int | str:
+    if _use_mongodb():
+        return mongo_repository.create_generated_file(file_data)
+
     ensure_user_exists(file_data["user_id"])
     with _connect() as connection:
         cursor = connection.execute(
@@ -267,6 +366,9 @@ def create_generated_file(file_data: dict[str, Any]) -> int:
 
 
 def count_generated_files(user_id: str) -> int:
+    if _use_mongodb():
+        return mongo_repository.count_generated_files(user_id)
+
     with _connect() as connection:
         row = connection.execute(
             "SELECT COUNT(*) AS total FROM generated_files WHERE user_id = ?",
@@ -285,3 +387,7 @@ def _json_or_none(value: Any) -> str | None:
     if value is None:
         return None
     return json.dumps(value, ensure_ascii=True)
+
+
+def _use_mongodb() -> bool:
+    return PERSISTENCE_BACKEND == "mongodb" and mongo_repository.is_configured()

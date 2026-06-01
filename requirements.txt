@@ -10,3 +10,4 @@ langchain-chroma
 chromadb
 langchain-community
 langchain-text-splitters
+pymongo

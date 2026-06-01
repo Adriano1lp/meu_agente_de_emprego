@@ -13,6 +13,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import (
     OPENAI_EMBEDDING_MODEL,
+    PERSISTENCE_BACKEND,
     get_default_user_chroma_dir,
     get_default_user_cv_file,
     get_user_chroma_dir,
@@ -20,7 +21,12 @@ from config import (
     get_user_documents_dir,
     ensure_openai_api_key,
 )
-from database.repository import create_embedding_run, get_latest_user_document_id
+from database.repository import (
+    create_embedding_run,
+    get_latest_user_cv_text,
+    get_latest_user_document_id,
+    replace_embedding_chunks,
+)
 
 OPENAI_API_KEY = ensure_openai_api_key()
 
@@ -48,18 +54,20 @@ def rebuild_vectorstore_for_user(user_id: str) -> dict[str, Any]:
                 detail="Nao foi possivel gerar chunks validos para o curriculo enviado",
             )
 
-        _reset_directory(chroma_dir)
-
         embeddings = OpenAIEmbeddings(
             model=OPENAI_EMBEDDING_MODEL,
             openai_api_key=OPENAI_API_KEY,
         )
 
-        Chroma.from_documents(
-            txt_chunks,
-            embedding=embeddings,
-            persist_directory=str(chroma_dir),
-        )
+        if _use_mongodb_embeddings():
+            embedded_chunks = _embed_chunks_for_mongodb(txt_chunks, embeddings)
+        else:
+            _reset_directory(chroma_dir)
+            Chroma.from_documents(
+                txt_chunks,
+                embedding=embeddings,
+                persist_directory=str(chroma_dir),
+            )
     except Exception as exc:
         create_embedding_run(
             {
@@ -90,6 +98,13 @@ def rebuild_vectorstore_for_user(user_id: str) -> dict[str, Any]:
             "processed_at": processed_at,
         },
     )
+    if _use_mongodb_embeddings():
+        replace_embedding_chunks(
+            user_id=user_id,
+            embedding_run_id=str(embedding_run_id),
+            embedding_model=OPENAI_EMBEDDING_MODEL,
+            chunks=embedded_chunks,
+        )
 
     return {
         "user_id": user_id,
@@ -98,6 +113,7 @@ def rebuild_vectorstore_for_user(user_id: str) -> dict[str, Any]:
         "processed_at": processed_at,
         "embedding_model": OPENAI_EMBEDDING_MODEL,
         "chroma_dir": str(chroma_dir),
+        "vector_store": "mongodb" if _use_mongodb_embeddings() else "chroma",
         "cv_file": str(cv_file),
     }
 
@@ -145,6 +161,11 @@ def _get_existing_user_cv_file(user_id: str) -> Path | None:
     if cv_file.exists():
         return cv_file
 
+    cv_text = get_latest_user_cv_text(user_id)
+    if cv_text:
+        cv_file.write_text(cv_text, encoding="utf-8")
+        return cv_file
+
     documents_dir = get_user_documents_dir(user_id)
     for filename in ("cv.pdf", "cv_original.pdf", "cv_original.txt"):
         candidate = documents_dir / filename
@@ -183,6 +204,23 @@ def _split_documents(documentos: list[Any], cv_file: Path) -> list[Any]:
         chunk.metadata = {"id": index, "source": str(cv_file.name)}
 
     return txt_chunks
+
+
+def _embed_chunks_for_mongodb(txt_chunks: list[Any], embeddings: OpenAIEmbeddings) -> list[dict[str, Any]]:
+    texts = [chunk.page_content for chunk in txt_chunks]
+    vectors = embeddings.embed_documents(texts)
+    return [
+        {
+            "content": chunk.page_content,
+            "metadata": dict(getattr(chunk, "metadata", {}) or {}),
+            "embedding": vector,
+        }
+        for chunk, vector in zip(txt_chunks, vectors)
+    ]
+
+
+def _use_mongodb_embeddings() -> bool:
+    return PERSISTENCE_BACKEND == "mongodb"
 
 
 def _reset_directory(directory: Path) -> None:

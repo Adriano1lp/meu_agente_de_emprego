@@ -15,6 +15,7 @@ from config import (
     APP_VERSION,
     AUTH_MODE,
     CORS_ALLOW_ORIGINS,
+    PERSISTENCE_BACKEND,
     PUBLIC_BASE_URL,
     ensure_runtime_config,
     get_user_chroma_dir,
@@ -22,9 +23,11 @@ from config import (
     get_user_output_dir,
 )
 from database.repository import (
+    count_embedding_chunks,
     count_generated_files,
     create_generated_file,
     create_processing_run,
+    get_latest_user_document_id,
 )
 from services.main_chat import generate_cover_letter, pipeline_with_details
 from services.main_carta import gerar_pdf_carta_apresentacao
@@ -228,12 +231,18 @@ def read_user_status(user_id: str = Depends(get_current_user_id)) -> dict[str, A
     chroma_dir = get_user_chroma_dir(user_id)
     output_dir = get_user_output_dir(user_id)
     profile = get_user_profile(user_id)
+    has_cv = cv_file.exists() or get_latest_user_document_id(user_id) is not None
+    has_embeddings = (
+        count_embedding_chunks(user_id) > 0
+        if PERSISTENCE_BACKEND == "mongodb"
+        else chroma_dir.exists() and any(chroma_dir.iterdir())
+    )
 
     return {
         "user_id": user_id,
-        "has_cv": cv_file.exists(),
+        "has_cv": has_cv,
         "has_profile": profile is not None,
-        "has_embeddings": chroma_dir.exists() and any(chroma_dir.iterdir()),
+        "has_embeddings": has_embeddings,
         "generated_files": max(
             count_generated_files(user_id),
             len([item for item in output_dir.iterdir() if item.is_file()]),

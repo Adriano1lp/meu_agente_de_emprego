@@ -4,7 +4,6 @@ import base64
 import hashlib
 import hmac
 import os
-import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
@@ -48,8 +47,10 @@ def register_user(
     }
     try:
         create_user(user)
-    except sqlite3.IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="Email ja cadastrado") from exc
+    except Exception as exc:
+        if "duplicate" in str(exc).lower() or "unique" in str(exc).lower():
+            raise HTTPException(status_code=409, detail="Email ja cadastrado") from exc
+        raise
 
     return _public_user(user)
 

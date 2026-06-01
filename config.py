@@ -15,6 +15,12 @@ STORAGE_DIR = Path(os.getenv("STORAGE_DIR", str(BASE_DIR / "storage"))).resolve(
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(STORAGE_DIR / "app.db"))).resolve()
 USERS_DIR = STORAGE_DIR / "users"
 DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID", "default").strip() or "default"
+MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
+MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "analista_de_vagas").strip()
+PERSISTENCE_BACKEND = os.getenv(
+    "PERSISTENCE_BACKEND",
+    "mongodb" if MONGODB_URI else "sqlite",
+).strip().lower()
 
 DOCUMENTS_DIR = LEGACY_DOCUMENTS_DIR
 OUTPUT_DIR = LEGACY_OUTPUT_DIR
@@ -134,4 +140,10 @@ def ensure_runtime_config() -> None:
         raise RuntimeError(
             "CORS_ALLOW_ORIGINS nao pode ser '*' em producao. "
             "Defina explicitamente o dominio do app."
+        )
+
+    if PERSISTENCE_BACKEND != "mongodb" or not MONGODB_URI:
+        raise RuntimeError(
+            "MongoDB obrigatorio em producao. Defina MONGODB_URI e "
+            "MONGODB_DATABASE no Render para manter usuarios e embeddings persistentes."
         )

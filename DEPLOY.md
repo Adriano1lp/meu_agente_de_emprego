@@ -34,6 +34,8 @@ Para esse cenario, a maior preocupacao nao e escala de CPU e sim:
 - `AUTH_MODE=jwt`
 - `JWT_SECRET`
 - `CORS_ALLOW_ORIGINS`
+- `MONGODB_URI`
+- `MONGODB_DATABASE`
 
 ## Variaveis de ambiente fortemente recomendadas
 
@@ -55,6 +57,9 @@ JWT_EXPIRATION_MINUTES=10080
 PUBLIC_BASE_URL=https://sua-api.onrender.com
 CORS_ALLOW_ORIGINS=https://seu-app.onrender.com
 STORAGE_DIR=/opt/render/project/src/storage
+PERSISTENCE_BACKEND=mongodb
+MONGODB_URI=mongodb+srv://usuario:senha@cluster.mongodb.net/?retryWrites=true&w=majority
+MONGODB_DATABASE=analista_de_vagas
 MAX_UPLOAD_SIZE_MB=10
 OPENAI_CHAT_MODEL=gpt-4o
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
@@ -66,6 +71,7 @@ Quando `ENVIRONMENT=production`, a API agora falha ao iniciar se:
 
 - `JWT_SECRET` estiver como `dev-secret-change-me`
 - `CORS_ALLOW_ORIGINS` estiver vazio ou com `*`
+- `MONGODB_URI` nao estiver configurada
 
 Isso evita deploy acidental com configuracao insegura.
 
@@ -101,16 +107,19 @@ Nao use `--reload` em producao.
 
 ## 4. Persistencia
 
-Atencao: o backend salva arquivos localmente. Se o servico estiver em filesystem efemero, voce pode perder:
+Atencao: o filesystem do Render pode ser efemero. A API agora deve usar MongoDB em producao para persistir:
 
 - contas
-- curriculos
-- embeddings
+- perfis
+- metadados e texto extraido dos curriculos
+- embeddings e chunks de contexto
+- registros de processamento
+
+Os PDFs gerados ainda sao arquivos locais em `storage/users/{user_id}/outputs/`. Se precisar manter downloads depois de redeploy/restart, configure disco persistente ou mova os PDFs para storage externo.
+
+Sem MongoDB, voce ainda pode perder:
+
 - PDFs gerados
-
-Para reduzir esse risco, configure `STORAGE_DIR` em um caminho persistente disponivel no seu ambiente.
-
-Se o seu servico no Render nao tiver persistencia adequada para esse path, trate isso como limitacao conhecida do deploy.
 
 ## 5. Dominio publico
 

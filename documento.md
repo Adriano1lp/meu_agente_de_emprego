@@ -367,9 +367,10 @@ curl \
 
 ### `POST /users/me/rebuild-embeddings`
 
-Le o `cv.txt` do usuario, quebra o curriculo em chunks e persiste os embeddings em:
+Le o curriculo do usuario, quebra o texto em chunks e persiste os embeddings.
 
-- `storage/users/{user_id}/chroma/`
+Em producao com MongoDB, os chunks e vetores ficam na colecao `embedding_chunks`.
+Em fallback local com SQLite, os vetores continuam em `storage/users/{user_id}/chroma/`.
 
 Esse endpoint deve ser chamado depois do upload do curriculo.
 
@@ -389,6 +390,7 @@ curl -X POST \
   "chunks": 1,
   "processed_at": "2026-04-27T18:50:00+00:00",
   "embedding_model": "text-embedding-3-small",
+  "vector_store": "mongodb",
   "chroma_dir": "C:\\Projetos\\analista_de_vagas\\meu_agente_de_emprego\\storage\\users\\user_123abc456def\\chroma",
   "cv_file": "C:\\Projetos\\analista_de_vagas\\meu_agente_de_emprego\\storage\\users\\user_123abc456def\\documents\\cv.txt"
 }
@@ -519,11 +521,11 @@ O fluxo correto de recuperacao agora e:
 
 ### Contas
 
-As contas autenticadas ficam persistidas em:
+Em producao, as contas autenticadas ficam persistidas no MongoDB, colecao `users`.
 
-- `storage/auth/users.json`
+No fallback local, as contas e metadados ficam em SQLite.
 
-Esse arquivo armazena:
+Esses registros armazenam:
 
 - email normalizado
 - `user_id`
@@ -533,11 +535,18 @@ Esse arquivo armazena:
 
 ### Dados do usuario
 
-Os dados de negocio continuam separados por `user_id` em:
+Em producao, os dados de negocio ficam em colecoes MongoDB separadas por `user_id`:
 
-- `storage/users/{user_id}/documents/`
-- `storage/users/{user_id}/profile.json`
-- `storage/users/{user_id}/chroma/`
+- `user_profiles`
+- `user_profile_versions`
+- `user_documents`
+- `embedding_runs`
+- `embedding_chunks`
+- `processing_runs`
+- `generated_files`
+
+Arquivos gerados para download continuam em:
+
 - `storage/users/{user_id}/outputs/`
 
 ## Variaveis de ambiente relevantes
@@ -552,3 +561,6 @@ Os dados de negocio continuam separados por `user_id` em:
 - `JWT_EXPIRATION_MINUTES`
 - `MAX_UPLOAD_SIZE_MB`
 - `STORAGE_DIR`
+- `MONGODB_URI`
+- `MONGODB_DATABASE`
+- `PERSISTENCE_BACKEND`

@@ -68,6 +68,7 @@ def save_user_cv(upload_file: UploadFile, user_id: str) -> dict[str, Any]:
             "original_content_type": upload_file.content_type or "application/octet-stream",
             "original_file_path": str(original_file_path),
             "extracted_text_path": str(cv_file),
+            "extracted_text": cv_text,
             "bytes_received": file_size,
             "checksum_sha256": hashlib.sha256(file_bytes).hexdigest(),
         },
