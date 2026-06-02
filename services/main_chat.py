@@ -18,6 +18,7 @@ from config import (
 from database.repository import find_similar_embedding_chunks, get_latest_user_cv_text
 
 OPENAI_API_KEY = ensure_openai_api_key()
+MINIMUM_MATCH_SCORE_TO_GENERATE_CURRICULUM = 60
 
 
 class Vaga(BaseModel):
@@ -377,7 +378,7 @@ cadeia_carta_apresentacao = prompt_carta_apresentacao | llm_openai | StrOutputPa
 
 def pipeline(vaga_texto: str, user_id: str) -> tuple[str, str]:
     result = pipeline_with_details(vaga_texto, user_id)
-    return result["curriculo"], result["resposta_usuario"]
+    return str(result.get("curriculo") or ""), str(result["resposta_usuario"])
 
 
 def pipeline_with_details(vaga_texto: str, user_id: str) -> dict[str, object]:
@@ -385,6 +386,22 @@ def pipeline_with_details(vaga_texto: str, user_id: str) -> dict[str, object]:
 
     vaga_struct = cadeia_1.invoke({"vaga": vaga_texto})
     matching = cadeia_2.invoke({"contexto": contexto, "vaga": vaga_struct})
+    match_score = _extract_match_score(matching)
+
+    if match_score < MINIMUM_MATCH_SCORE_TO_GENERATE_CURRICULUM:
+        return {
+            "curriculo": None,
+            "resposta_usuario": _build_low_match_response(match_score, matching),
+            "vaga": vaga_struct,
+            "matching": matching,
+            "otimizacao": {
+                "blocked_reason": "low_match_score",
+                "minimum_match_score": MINIMUM_MATCH_SCORE_TO_GENERATE_CURRICULUM,
+            },
+            "match_score": match_score,
+            "should_generate_curriculum": False,
+        }
+
     otimizacao = cadeia_3.invoke({"vaga": vaga_struct, "matching": matching})
     resposta_usuario = cadeia_resposta.invoke(
         {"vaga": vaga_struct, "matching": matching},
@@ -403,6 +420,8 @@ def pipeline_with_details(vaga_texto: str, user_id: str) -> dict[str, object]:
         "vaga": vaga_struct,
         "matching": matching,
         "otimizacao": otimizacao,
+        "match_score": match_score,
+        "should_generate_curriculum": True,
     }
 
 
@@ -461,6 +480,60 @@ def _load_candidate_context(vaga_texto: str, user_id: str) -> str:
         )
 
     return contexto
+
+
+def _extract_match_score(matching: object) -> int:
+    value: object = None
+    if isinstance(matching, dict):
+        value = matching.get("match_score")
+    else:
+        value = getattr(matching, "match_score", None)
+
+    try:
+        score = int(value)
+    except (TypeError, ValueError):
+        score = 0
+
+    return max(0, min(100, score))
+
+
+def _build_low_match_response(match_score: int, matching: object) -> str:
+    gaps = _extract_list_field(matching, "gaps_criticos")
+    missing_skills = _extract_list_field(matching, "missing_skills")
+    strengths = _extract_list_field(matching, "pontos_fortes")
+    lines = [
+        f"Sua adesao a esta vaga ficou em {match_score}%.",
+        (
+            "Com um resultado abaixo de 60%, nao recomendo a candidatura para esta vaga, "
+            "pois a baixa compatibilidade pode indicar que o processo seletivo nao avancara muito ou que o candidato nao tem as qualificacoes basicas requeridas."
+        ),
+    ]
+
+    if strengths:
+        lines.append("Pontos fortes identificados: " + "; ".join(strengths[:5]) + ".")
+
+    combined_gaps = [*gaps, *missing_skills]
+    if combined_gaps:
+        lines.append("Principais lacunas: " + "; ".join(combined_gaps[:6]) + ".")
+
+    lines.append(
+        "Recomendacao: priorize vagas mais proximas do seu perfil ou atualize o curriculo "
+        "com experiencias reais relacionadas aos requisitos antes de tentar novamente."
+    )
+    return "\n\n".join(lines)
+
+
+def _extract_list_field(source: object, field_name: str) -> list[str]:
+    value: object
+    if isinstance(source, dict):
+        value = source.get(field_name)
+    else:
+        value = getattr(source, field_name, None)
+
+    if not isinstance(value, list):
+        return []
+
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _load_mongodb_candidate_context(vaga_texto: str, user_id: str) -> list[str]:

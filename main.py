@@ -280,16 +280,41 @@ def processar(
     request_data: RequestData,
     request: Request,
     user_id: str = Depends(get_current_user_id),
-) -> dict[str, str]:
+) -> dict[str, Any]:
     texto_entrada = request_data.texto.strip()
     if not texto_entrada:
         raise HTTPException(status_code=400, detail="Texto nao pode ser vazio")
 
     try:
         pipeline_result = pipeline_with_details(texto_entrada, user_id)
-        curriculo_otimizado = str(pipeline_result["curriculo"])
         resposta_usuario = str(pipeline_result["resposta_usuario"])
+        match_score = _safe_int(pipeline_result.get("match_score"))
 
+        if not bool(pipeline_result.get("should_generate_curriculum", True)):
+            create_processing_run(
+                {
+                    "user_id": user_id,
+                    "input_text": texto_entrada,
+                    "job_data": pipeline_result.get("vaga"),
+                    "matching": pipeline_result.get("matching"),
+                    "optimization": pipeline_result.get("otimizacao"),
+                    "response_text": resposta_usuario,
+                    "status": "completed",
+                    "error_message": None,
+                    "completed_at": _utc_now_iso(),
+                },
+            )
+            return {
+                "texto_resposta": resposta_usuario,
+                "pdf_url": None,
+                "user_id": user_id,
+                "match_score": match_score,
+                "pdf_generated": False,
+                "generation_blocked": True,
+                "blocked_reason": "low_match_score",
+            }
+
+        curriculo_otimizado = str(pipeline_result["curriculo"])
         nome_arquivo = f"{uuid.uuid4()}.pdf"
         caminho_pdf = get_user_output_dir(user_id) / nome_arquivo
         gerar_pdf_profissional(curriculo_otimizado, str(caminho_pdf))
@@ -324,6 +349,9 @@ def processar(
             "texto_resposta": resposta_usuario,
             "pdf_url": pdf_url,
             "user_id": user_id,
+            "match_score": match_score,
+            "pdf_generated": True,
+            "generation_blocked": False,
         }
     except HTTPException:
         raise
@@ -422,3 +450,10 @@ def _utc_now_iso() -> str:
     from datetime import UTC, datetime
 
     return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0

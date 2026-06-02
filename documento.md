@@ -463,9 +463,32 @@ curl -X POST \
 {
   "texto_resposta": "Resumo do fit do candidato com a vaga...",
   "pdf_url": "http://localhost:8000/users/me/files/arquivo.pdf",
-  "user_id": "user_123abc456def"
+  "user_id": "user_123abc456def",
+  "match_score": 78,
+  "pdf_generated": true,
+  "generation_blocked": false
 }
 ```
+
+### Baixa adesao
+
+Quando a adesao calculada em `match_score` for menor que 60, a API nao gera curriculo otimizado nem PDF. Isso evita consumo desnecessario de tokens em vagas com baixa compatibilidade.
+
+Resposta esperada nesse caso:
+
+```json
+{
+  "texto_resposta": "Sua adesao a esta vaga ficou em 42%...",
+  "pdf_url": null,
+  "user_id": "user_123abc456def",
+  "match_score": 42,
+  "pdf_generated": false,
+  "generation_blocked": true,
+  "blocked_reason": "low_match_score"
+}
+```
+
+O app deve exibir `texto_resposta` normalmente e nao exibir botao de PDF quando `pdf_url` vier vazio ou nulo.
 
 ### Erros comuns
 
