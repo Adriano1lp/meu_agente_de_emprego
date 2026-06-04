@@ -343,6 +343,85 @@ def create_processing_run(run: dict[str, Any]) -> int | str:
         return int(cursor.lastrowid)
 
 
+def create_job_analysis_insight(insight: dict[str, Any]) -> int | str:
+    if _use_mongodb():
+        return mongo_repository.create_job_analysis_insight(insight)
+
+    ensure_user_exists(insight["user_id"])
+    payload = {
+        **insight,
+        "strengths_json": _json_or_none(insight.get("strengths")) or "[]",
+        "critical_gaps_json": _json_or_none(insight.get("critical_gaps")) or "[]",
+        "matching_skills_json": _json_or_none(insight.get("matching_skills")) or "[]",
+        "missing_skills_json": _json_or_none(insight.get("missing_skills")) or "[]",
+        "generation_blocked": 1 if insight.get("generation_blocked") else 0,
+    }
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO job_analysis_insights (
+                user_id, processing_run_id, job_title, company_name, job_summary,
+                match_score, strengths_json, critical_gaps_json, matching_skills_json,
+                missing_skills_json, status, generation_blocked, blocked_reason, source,
+                created_at
+            )
+            VALUES (
+                :user_id, :processing_run_id, :job_title, :company_name, :job_summary,
+                :match_score, :strengths_json, :critical_gaps_json, :matching_skills_json,
+                :missing_skills_json, :status, :generation_blocked, :blocked_reason,
+                :source, :created_at
+            )
+            ON CONFLICT(user_id, processing_run_id) DO UPDATE SET
+                job_title = excluded.job_title,
+                company_name = excluded.company_name,
+                job_summary = excluded.job_summary,
+                match_score = excluded.match_score,
+                strengths_json = excluded.strengths_json,
+                critical_gaps_json = excluded.critical_gaps_json,
+                matching_skills_json = excluded.matching_skills_json,
+                missing_skills_json = excluded.missing_skills_json,
+                status = excluded.status,
+                generation_blocked = excluded.generation_blocked,
+                blocked_reason = excluded.blocked_reason,
+                source = excluded.source
+            """,
+            payload,
+        )
+        return int(cursor.lastrowid)
+
+
+def list_job_analysis_insights(
+    user_id: str,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    if _use_mongodb():
+        return mongo_repository.list_job_analysis_insights(
+            user_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                insight_id, user_id, processing_run_id, job_title, company_name,
+                job_summary, match_score, strengths_json, critical_gaps_json,
+                matching_skills_json, missing_skills_json, status, generation_blocked,
+                blocked_reason, source, created_at
+            FROM job_analysis_insights
+            WHERE user_id = ?
+            ORDER BY created_at DESC, insight_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, limit, offset),
+        ).fetchall()
+
+    return [_insight_row_to_dict(row) for row in rows]
+
+
 def create_generated_file(file_data: dict[str, Any]) -> int | str:
     if _use_mongodb():
         return mongo_repository.create_generated_file(file_data)
@@ -387,6 +466,33 @@ def _json_or_none(value: Any) -> str | None:
     if value is None:
         return None
     return json.dumps(value, ensure_ascii=True)
+
+
+def _json_list(value: str | None) -> list[Any]:
+    if not value:
+        return []
+    loaded = json.loads(value)
+    return loaded if isinstance(loaded, list) else []
+
+
+def _insight_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": str(row["insight_id"]),
+        "processing_run_id": row["processing_run_id"],
+        "created_at": row["created_at"],
+        "job_title": row["job_title"],
+        "company_name": row["company_name"],
+        "job_summary": row["job_summary"],
+        "match_score": int(row["match_score"]),
+        "strengths": _json_list(row["strengths_json"]),
+        "critical_gaps": _json_list(row["critical_gaps_json"]),
+        "matching_skills": _json_list(row["matching_skills_json"]),
+        "missing_skills": _json_list(row["missing_skills_json"]),
+        "status": row["status"],
+        "generation_blocked": bool(row["generation_blocked"]),
+        "blocked_reason": row["blocked_reason"],
+        "source": row["source"],
+    }
 
 
 def _use_mongodb() -> bool:

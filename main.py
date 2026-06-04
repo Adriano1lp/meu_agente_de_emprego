@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,8 +26,10 @@ from database.repository import (
     count_embedding_chunks,
     count_generated_files,
     create_generated_file,
+    create_job_analysis_insight,
     create_processing_run,
     get_latest_user_document_id,
+    list_job_analysis_insights,
 )
 from services.main_chat import generate_cover_letter, pipeline_with_details
 from services.main_carta import gerar_pdf_carta_apresentacao
@@ -275,6 +277,19 @@ def download_user_file(
     )
 
 
+@app.get("/users/me/gap-history")
+def read_gap_history(
+    user_id: str = Depends(get_current_user_id),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    return {
+        "items": list_job_analysis_insights(user_id, limit=limit, offset=offset),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 @app.post("/processar")
 def processar(
     request_data: RequestData,
@@ -291,7 +306,7 @@ def processar(
         match_score = _safe_int(pipeline_result.get("match_score"))
 
         if not bool(pipeline_result.get("should_generate_curriculum", True)):
-            create_processing_run(
+            processing_run_id = create_processing_run(
                 {
                     "user_id": user_id,
                     "input_text": texto_entrada,
@@ -303,6 +318,16 @@ def processar(
                     "error_message": None,
                     "completed_at": _utc_now_iso(),
                 },
+            )
+            _create_gap_history_from_pipeline(
+                user_id=user_id,
+                processing_run_id=processing_run_id,
+                input_text=texto_entrada,
+                pipeline_result=pipeline_result,
+                match_score=match_score,
+                status="completed",
+                generation_blocked=True,
+                blocked_reason="low_match_score",
             )
             return {
                 "texto_resposta": resposta_usuario,
@@ -343,6 +368,16 @@ def processar(
                 "media_type": "application/pdf",
                 "bytes_size": caminho_pdf.stat().st_size if caminho_pdf.exists() else None,
             },
+        )
+        _create_gap_history_from_pipeline(
+            user_id=user_id,
+            processing_run_id=processing_run_id,
+            input_text=texto_entrada,
+            pipeline_result=pipeline_result,
+            match_score=match_score,
+            status="completed",
+            generation_blocked=False,
+            blocked_reason=None,
         )
 
         return {
@@ -457,3 +492,77 @@ def _safe_int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _create_gap_history_from_pipeline(
+    *,
+    user_id: str,
+    processing_run_id: int | str,
+    input_text: str,
+    pipeline_result: dict[str, Any],
+    match_score: int,
+    status: str,
+    generation_blocked: bool,
+    blocked_reason: str | None,
+) -> None:
+    vaga = pipeline_result.get("vaga")
+    matching = pipeline_result.get("matching")
+    create_job_analysis_insight(
+        {
+            "user_id": user_id,
+            "processing_run_id": processing_run_id,
+            "job_title": _extract_job_title(vaga),
+            "company_name": _extract_text_field(vaga, "empresa"),
+            "job_summary": _summarize_text(input_text),
+            "match_score": match_score,
+            "strengths": _extract_list_field(matching, "pontos_fortes"),
+            "critical_gaps": _extract_list_field(matching, "gaps_criticos"),
+            "matching_skills": _extract_list_field(matching, "matching_skills"),
+            "missing_skills": _extract_list_field(matching, "missing_skills"),
+            "status": status,
+            "generation_blocked": generation_blocked,
+            "blocked_reason": blocked_reason,
+            "source": "processar",
+            "created_at": _utc_now_iso(),
+        },
+    )
+
+
+def _extract_job_title(vaga: Any) -> str | None:
+    for field_name in ("cargo", "titulo", "title", "job_title", "nivel"):
+        value = _extract_text_field(vaga, field_name)
+        if value and value != "Nao informado":
+            return value
+    return None
+
+
+def _extract_text_field(source: Any, field_name: str) -> str | None:
+    if isinstance(source, dict):
+        value = source.get(field_name)
+    else:
+        value = getattr(source, field_name, None)
+
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    return text or None
+
+
+def _extract_list_field(source: Any, field_name: str) -> list[str]:
+    if isinstance(source, dict):
+        value = source.get(field_name)
+    else:
+        value = getattr(source, field_name, None)
+
+    if not isinstance(value, list):
+        return []
+
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _summarize_text(text: str, max_length: int = 500) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= max_length:
+        return normalized
+    return normalized[: max_length - 3].rstrip() + "..."

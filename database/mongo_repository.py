@@ -218,6 +218,44 @@ def create_processing_run(run: dict[str, Any]) -> str:
     return str(result.inserted_id)
 
 
+def create_job_analysis_insight(insight: dict[str, Any]) -> str:
+    ensure_user_exists(insight["user_id"])
+    now = _utc_now_iso()
+    payload = {
+        **insight,
+        "created_at": insight.get("created_at") or now,
+        "updated_at": now,
+    }
+    result = _get_collection("job_analysis_insights").update_one(
+        {
+            "user_id": insight["user_id"],
+            "processing_run_id": insight.get("processing_run_id"),
+        },
+        {
+            "$set": payload,
+            "$setOnInsert": {"inserted_at": now},
+        },
+        upsert=True,
+    )
+    return str(result.upserted_id or insight.get("processing_run_id") or "")
+
+
+def list_job_analysis_insights(
+    user_id: str,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    documents = _get_collection("job_analysis_insights").find(
+        {"user_id": user_id},
+        {"_id": 1, "user_id": 0, "updated_at": 0, "inserted_at": 0},
+        sort=[("created_at", -1), ("_id", -1)],
+        skip=offset,
+        limit=limit,
+    )
+    return [_mongo_insight_to_dict(document) for document in documents]
+
+
 def create_generated_file(file_data: dict[str, Any]) -> str:
     ensure_user_exists(file_data["user_id"])
     result = _get_collection("generated_files").insert_one(
@@ -271,6 +309,11 @@ def _ensure_indexes(database: Any) -> None:
     database.embedding_runs.create_index([("user_id", 1), ("processed_at", -1)])
     database.embedding_chunks.create_index("user_id")
     database.processing_runs.create_index([("user_id", 1), ("created_at", -1)])
+    database.job_analysis_insights.create_index([("user_id", 1), ("created_at", -1)])
+    database.job_analysis_insights.create_index(
+        [("user_id", 1), ("processing_run_id", 1)],
+        unique=True,
+    )
     database.generated_files.create_index([("user_id", 1), ("created_at", -1)])
     _indexes_ready = True
 
@@ -290,3 +333,27 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def _mongo_insight_to_dict(document: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(document.get("_id")),
+        "processing_run_id": document.get("processing_run_id"),
+        "created_at": document.get("created_at"),
+        "job_title": document.get("job_title"),
+        "company_name": document.get("company_name"),
+        "job_summary": document.get("job_summary"),
+        "match_score": int(document.get("match_score") or 0),
+        "strengths": _list_or_empty(document.get("strengths")),
+        "critical_gaps": _list_or_empty(document.get("critical_gaps")),
+        "matching_skills": _list_or_empty(document.get("matching_skills")),
+        "missing_skills": _list_or_empty(document.get("missing_skills")),
+        "status": document.get("status"),
+        "generation_blocked": bool(document.get("generation_blocked")),
+        "blocked_reason": document.get("blocked_reason"),
+        "source": document.get("source"),
+    }
+
+
+def _list_or_empty(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
