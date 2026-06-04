@@ -490,13 +490,69 @@ Resposta esperada nesse caso:
 
 O app deve exibir `texto_resposta` normalmente e nao exibir botao de PDF quando `pdf_url` vier vazio ou nulo.
 
+Cada chamada valida de `POST /processar` tambem registra um historico estruturado de pontos fortes e gaps do usuario, mesmo quando a geracao de PDF e bloqueada por baixa adesao.
+
 ### Erros comuns
 
 - `400`: `texto` vazio
 - `400`: embeddings do usuario ainda nao gerados
 - `500`: erro interno ao processar LLM, embeddings ou geracao de PDF
 
-## 12. Download de arquivos do usuario
+## 12. Historico de gaps do usuario
+
+### `GET /users/me/gap-history`
+
+Retorna o historico de pontos fortes, lacunas e habilidades identificadas nas analises de vaga do usuario autenticado.
+
+### Query params
+
+- `limit`: quantidade maxima de registros, entre 1 e 100. Padrao: 20.
+- `offset`: deslocamento para paginacao simples. Padrao: 0.
+
+### Exemplo
+
+```bash
+curl \
+  -H "Authorization: Bearer <jwt>" \
+  "http://localhost:8000/users/me/gap-history?limit=10"
+```
+
+### Resposta esperada
+
+```json
+{
+  "items": [
+    {
+      "id": "1",
+      "processing_run_id": 10,
+      "created_at": "2026-06-04T10:00:00+00:00",
+      "job_title": "Analista de Dados",
+      "company_name": "ACME",
+      "job_summary": "Vaga para Analista de Dados com SQL e Power BI",
+      "match_score": 72,
+      "strengths": ["SQL"],
+      "critical_gaps": ["Power BI avancado"],
+      "matching_skills": ["SQL"],
+      "missing_skills": ["Power BI"],
+      "status": "completed",
+      "generation_blocked": false,
+      "blocked_reason": null,
+      "source": "processar"
+    }
+  ],
+  "limit": 10,
+  "offset": 0
+}
+```
+
+### Regras importantes
+
+- a rota e autenticada;
+- cada usuario ve apenas seu proprio historico;
+- os registros sao retornados do mais recente para o mais antigo;
+- o historico e gravado tanto em baixa adesao quanto em alta adesao.
+
+## 13. Download de arquivos do usuario
 
 ### `GET /users/me/files/{nome_do_arquivo}`
 
@@ -527,7 +583,8 @@ curl \
 6. `POST /users/me/rebuild-embeddings`
 7. `GET /users/me/status`
 8. `POST /processar`
-9. `GET /users/me/files/{nome_do_arquivo}`
+9. `GET /users/me/gap-history`
+10. `GET /users/me/files/{nome_do_arquivo}`
 
 ## Recuperacao de usuario em outro dispositivo
 
@@ -566,6 +623,7 @@ Em producao, os dados de negocio ficam em colecoes MongoDB separadas por `user_i
 - `embedding_runs`
 - `embedding_chunks`
 - `processing_runs`
+- `job_analysis_insights`
 - `generated_files`
 
 Arquivos gerados para download continuam em:

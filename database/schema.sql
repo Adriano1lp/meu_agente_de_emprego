@@ -103,6 +103,32 @@ CREATE TABLE IF NOT EXISTS processing_runs (
 CREATE INDEX IF NOT EXISTS idx_processing_runs_user_id
     ON processing_runs (user_id);
 
+CREATE TABLE IF NOT EXISTS job_analysis_insights (
+    insight_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    processing_run_id INTEGER,
+    job_title TEXT,
+    company_name TEXT,
+    job_summary TEXT,
+    match_score INTEGER NOT NULL DEFAULT 0,
+    strengths_json TEXT NOT NULL DEFAULT '[]',
+    critical_gaps_json TEXT NOT NULL DEFAULT '[]',
+    matching_skills_json TEXT NOT NULL DEFAULT '[]',
+    missing_skills_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'completed',
+    generation_blocked INTEGER NOT NULL DEFAULT 0,
+    blocked_reason TEXT,
+    source TEXT NOT NULL DEFAULT 'processar',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, processing_run_id),
+    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+    FOREIGN KEY (processing_run_id) REFERENCES processing_runs (processing_run_id) ON DELETE SET NULL,
+    CHECK (status IN ('pending', 'completed', 'failed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_analysis_insights_user_created
+    ON job_analysis_insights (user_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS generated_files (
     generated_file_id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL,
