@@ -264,6 +264,66 @@ def create_generated_file(file_data: dict[str, Any]) -> str:
     return str(result.inserted_id)
 
 
+def create_development_plan(plan: dict[str, Any]) -> str:
+    ensure_user_exists(plan["user_id"])
+    payload = {
+        **plan,
+        "created_at": plan.get("created_at") or _utc_now_iso(),
+        "updated_at": plan.get("updated_at") or _utc_now_iso(),
+    }
+    _get_collection("development_plans").insert_one(payload)
+    return str(plan["pdi_id"])
+
+
+def update_development_plan(plan: dict[str, Any]) -> None:
+    _get_collection("development_plans").update_one(
+        {
+            "user_id": plan["user_id"],
+            "pdi_id": plan["pdi_id"],
+        },
+        {
+            "$set": {
+                key: value
+                for key, value in plan.items()
+                if key not in {"_id", "pdi_id", "user_id", "created_at"}
+            },
+        },
+    )
+
+
+def get_active_development_plan(user_id: str) -> dict[str, Any] | None:
+    plan = _get_collection("development_plans").find_one(
+        {"user_id": user_id, "status": "active"},
+        {"_id": 0},
+        sort=[("created_at", -1), ("pdi_id", -1)],
+    )
+    return dict(plan) if plan else None
+
+
+def get_development_plan(user_id: str, pdi_id: str) -> dict[str, Any] | None:
+    plan = _get_collection("development_plans").find_one(
+        {"user_id": user_id, "pdi_id": pdi_id},
+        {"_id": 0},
+    )
+    return dict(plan) if plan else None
+
+
+def list_development_plans(
+    user_id: str,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    documents = _get_collection("development_plans").find(
+        {"user_id": user_id},
+        {"_id": 0},
+        sort=[("created_at", -1), ("pdi_id", -1)],
+        skip=offset,
+        limit=limit,
+    )
+    return [dict(document) for document in documents]
+
+
 def count_generated_files(user_id: str) -> int:
     return int(_get_collection("generated_files").count_documents({"user_id": user_id}))
 
@@ -312,6 +372,12 @@ def _ensure_indexes(database: Any) -> None:
     database.job_analysis_insights.create_index([("user_id", 1), ("created_at", -1)])
     database.job_analysis_insights.create_index(
         [("user_id", 1), ("processing_run_id", 1)],
+        unique=True,
+    )
+    database.development_plans.create_index([("user_id", 1), ("created_at", -1)])
+    database.development_plans.create_index([("user_id", 1), ("status", 1)])
+    database.development_plans.create_index(
+        [("user_id", 1), ("pdi_id", 1)],
         unique=True,
     )
     database.generated_files.create_index([("user_id", 1), ("created_at", -1)])
