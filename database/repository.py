@@ -444,6 +444,133 @@ def create_generated_file(file_data: dict[str, Any]) -> int | str:
         return int(cursor.lastrowid)
 
 
+def create_development_plan(plan: dict[str, Any]) -> str:
+    if _use_mongodb():
+        return mongo_repository.create_development_plan(plan)
+
+    ensure_user_exists(plan["user_id"])
+    payload = _development_plan_to_sql_payload(plan)
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO development_plans (
+                pdi_id, user_id, source_insight_ids_json,
+                source_processing_run_ids_json, generated_from_limit, title,
+                main_objective, summary, secondary_objectives_json,
+                priority_areas_json, priority_gaps_json, strengths_to_leverage_json,
+                plan_70_json, plan_20_json, plan_10_json, checklist_items_json,
+                progress_percent, status, created_at, updated_at, completed_at
+            )
+            VALUES (
+                :pdi_id, :user_id, :source_insight_ids_json,
+                :source_processing_run_ids_json, :generated_from_limit, :title,
+                :main_objective, :summary, :secondary_objectives_json,
+                :priority_areas_json, :priority_gaps_json, :strengths_to_leverage_json,
+                :plan_70_json, :plan_20_json, :plan_10_json, :checklist_items_json,
+                :progress_percent, :status, :created_at, :updated_at, :completed_at
+            )
+            """,
+            payload,
+        )
+    return str(plan["pdi_id"])
+
+
+def update_development_plan(plan: dict[str, Any]) -> None:
+    if _use_mongodb():
+        mongo_repository.update_development_plan(plan)
+        return
+
+    payload = _development_plan_to_sql_payload(plan)
+    with _connect() as connection:
+        connection.execute(
+            """
+            UPDATE development_plans
+            SET
+                source_insight_ids_json = :source_insight_ids_json,
+                source_processing_run_ids_json = :source_processing_run_ids_json,
+                generated_from_limit = :generated_from_limit,
+                title = :title,
+                main_objective = :main_objective,
+                summary = :summary,
+                secondary_objectives_json = :secondary_objectives_json,
+                priority_areas_json = :priority_areas_json,
+                priority_gaps_json = :priority_gaps_json,
+                strengths_to_leverage_json = :strengths_to_leverage_json,
+                plan_70_json = :plan_70_json,
+                plan_20_json = :plan_20_json,
+                plan_10_json = :plan_10_json,
+                checklist_items_json = :checklist_items_json,
+                progress_percent = :progress_percent,
+                status = :status,
+                updated_at = :updated_at,
+                completed_at = :completed_at
+            WHERE pdi_id = :pdi_id AND user_id = :user_id
+            """,
+            payload,
+        )
+
+
+def get_active_development_plan(user_id: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_active_development_plan(user_id)
+
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM development_plans
+            WHERE user_id = ? AND status = 'active'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+    return _development_plan_row_to_dict(row) if row else None
+
+
+def get_development_plan(user_id: str, pdi_id: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_development_plan(user_id=user_id, pdi_id=pdi_id)
+
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM development_plans
+            WHERE user_id = ? AND pdi_id = ?
+            """,
+            (user_id, pdi_id),
+        ).fetchone()
+    return _development_plan_row_to_dict(row) if row else None
+
+
+def list_development_plans(
+    user_id: str,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    if _use_mongodb():
+        return mongo_repository.list_development_plans(
+            user_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM development_plans
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, limit, offset),
+        ).fetchall()
+    return [_development_plan_row_to_dict(row) for row in rows]
+
+
 def count_generated_files(user_id: str) -> int:
     if _use_mongodb():
         return mongo_repository.count_generated_files(user_id)
@@ -492,6 +619,62 @@ def _insight_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "generation_blocked": bool(row["generation_blocked"]),
         "blocked_reason": row["blocked_reason"],
         "source": row["source"],
+    }
+
+
+def _development_plan_to_sql_payload(plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "pdi_id": plan["pdi_id"],
+        "user_id": plan["user_id"],
+        "source_insight_ids_json": _json_or_none(plan.get("source_insight_ids")) or "[]",
+        "source_processing_run_ids_json": (
+            _json_or_none(plan.get("source_processing_run_ids")) or "[]"
+        ),
+        "generated_from_limit": int(plan.get("generated_from_limit") or 10),
+        "title": plan["title"],
+        "main_objective": plan["main_objective"],
+        "summary": plan["summary"],
+        "secondary_objectives_json": _json_or_none(plan.get("secondary_objectives")) or "[]",
+        "priority_areas_json": _json_or_none(plan.get("priority_areas")) or "[]",
+        "priority_gaps_json": _json_or_none(plan.get("priority_gaps")) or "[]",
+        "strengths_to_leverage_json": (
+            _json_or_none(plan.get("strengths_to_leverage")) or "[]"
+        ),
+        "plan_70_json": _json_or_none(plan.get("plan_70")) or "[]",
+        "plan_20_json": _json_or_none(plan.get("plan_20")) or "[]",
+        "plan_10_json": _json_or_none(plan.get("plan_10")) or "[]",
+        "checklist_items_json": _json_or_none(plan.get("checklist_items")) or "[]",
+        "progress_percent": int(plan.get("progress_percent") or 0),
+        "status": plan.get("status") or "active",
+        "created_at": plan.get("created_at"),
+        "updated_at": plan.get("updated_at"),
+        "completed_at": plan.get("completed_at"),
+    }
+
+
+def _development_plan_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "pdi_id": row["pdi_id"],
+        "user_id": row["user_id"],
+        "source_insight_ids": _json_list(row["source_insight_ids_json"]),
+        "source_processing_run_ids": _json_list(row["source_processing_run_ids_json"]),
+        "generated_from_limit": int(row["generated_from_limit"]),
+        "title": row["title"],
+        "main_objective": row["main_objective"],
+        "summary": row["summary"],
+        "secondary_objectives": _json_list(row["secondary_objectives_json"]),
+        "priority_areas": _json_list(row["priority_areas_json"]),
+        "priority_gaps": _json_list(row["priority_gaps_json"]),
+        "strengths_to_leverage": _json_list(row["strengths_to_leverage_json"]),
+        "plan_70": _json_list(row["plan_70_json"]),
+        "plan_20": _json_list(row["plan_20_json"]),
+        "plan_10": _json_list(row["plan_10_json"]),
+        "checklist_items": _json_list(row["checklist_items_json"]),
+        "progress_percent": int(row["progress_percent"]),
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "completed_at": row["completed_at"],
     }
 
 

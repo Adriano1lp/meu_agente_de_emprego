@@ -36,6 +36,14 @@ from services.main_carta import gerar_pdf_carta_apresentacao
 from services.main_curriculo import gerar_pdf_profissional
 from services.main_rag import rebuild_vectorstore_for_user
 from services.auth_users import authenticate_user, get_user_by_id, register_user
+from services.development_plan import (
+    DEFAULT_ANALYSIS_LIMIT,
+    MAX_ANALYSIS_LIMIT,
+    generate_development_plan,
+    read_active_development_plan,
+    read_development_plan_history,
+    update_development_plan_item_status,
+)
 from services.user_data import get_user_profile, save_user_cv, save_user_profile
 
 ensure_runtime_config()
@@ -57,6 +65,15 @@ class RequestData(BaseModel):
 
 class CoverLetterRequest(BaseModel):
     empresa: str
+
+
+class DevelopmentPlanGenerateRequest(BaseModel):
+    limit: int = Field(default=DEFAULT_ANALYSIS_LIMIT, ge=1, le=MAX_ANALYSIS_LIMIT)
+    replace_active: bool = False
+
+
+class DevelopmentPlanItemStatusRequest(BaseModel):
+    status: str
 
 
 class UserProfileRequest(BaseModel):
@@ -288,6 +305,61 @@ def read_gap_history(
         "limit": limit,
         "offset": offset,
     }
+
+
+@app.post("/users/me/development-plan/generate")
+def generate_user_development_plan(
+    payload: DevelopmentPlanGenerateRequest,
+    user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    return generate_development_plan(
+        user_id=user_id,
+        limit=payload.limit,
+        replace_active=payload.replace_active,
+    )
+
+
+@app.get("/users/me/development-plan/active")
+def read_user_active_development_plan(
+    user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    plan = read_active_development_plan(user_id)
+    return {
+        "exists": plan is not None,
+        "plan": plan,
+    }
+
+
+@app.get("/users/me/development-plans")
+def read_user_development_plans(
+    user_id: str = Depends(get_current_user_id),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    return {
+        "items": read_development_plan_history(
+            user_id=user_id,
+            limit=limit,
+            offset=offset,
+        ),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.patch("/users/me/development-plan/{pdi_id}/items/{item_id}")
+def update_user_development_plan_item(
+    pdi_id: str,
+    item_id: str,
+    payload: DevelopmentPlanItemStatusRequest,
+    user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    return update_development_plan_item_status(
+        user_id=user_id,
+        pdi_id=pdi_id,
+        item_id=item_id,
+        status=payload.status,
+    )
 
 
 @app.post("/processar")

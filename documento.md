@@ -554,6 +554,96 @@ curl \
 
 ## 13. Download de arquivos do usuario
 
+## 13. PDI do usuario
+
+### `POST /users/me/development-plan/generate`
+
+Gera um Plano de Desenvolvimento Individual com base nas ultimas analises salvas em `job_analysis_insights`.
+
+### Body esperado
+
+```json
+{
+  "limit": 10,
+  "replace_active": true
+}
+```
+
+### Resposta esperada
+
+```json
+{
+  "pdi_id": "pdi_123",
+  "title": "PDI para evoluir nos gaps das vagas analisadas",
+  "main_objective": "Desenvolver dominio pratico em Power BI e Airflow...",
+  "summary": "Plano criado a partir das ultimas vagas analisadas.",
+  "priority_gaps": ["Power BI", "Airflow"],
+  "strengths_to_leverage": ["Python", "SQL"],
+  "progress_percent": 0,
+  "status": "active",
+  "sections": {
+    "70": [],
+    "20": [],
+    "10": []
+  },
+  "checklist_items": []
+}
+```
+
+### Regras importantes
+
+- a rota e autenticada;
+- usa apenas historico do usuario autenticado;
+- exige pelo menos duas analises de vaga;
+- `limit` aceita valores entre 1 e 20;
+- se ja existir PDI ativo, enviar `replace_active=true` para substituir;
+- os itens iniciam com status `pending` e progresso `0`.
+
+### `GET /users/me/development-plan/active`
+
+Retorna o PDI ativo do usuario.
+
+```json
+{
+  "exists": true,
+  "plan": {
+    "pdi_id": "pdi_123",
+    "progress_percent": 0
+  }
+}
+```
+
+### `GET /users/me/development-plans`
+
+Retorna historico resumido de PDIs do usuario autenticado.
+
+Query params:
+
+- `limit`: entre 1 e 100. Padrao: 20.
+- `offset`: deslocamento para paginacao. Padrao: 0.
+
+### `PATCH /users/me/development-plan/{pdi_id}/items/{item_id}`
+
+Atualiza o status de um item do checklist e recalcula o progresso.
+
+Body esperado:
+
+```json
+{
+  "status": "completed"
+}
+```
+
+Status aceitos:
+
+- `pending`
+- `in_progress`
+- `completed`
+
+Quando todos os pesos forem concluidos, o PDI passa para `completed`. Se algum item for reaberto, volta para `active`.
+
+## 14. Download de arquivos do usuario
+
 ### `GET /users/me/files/{nome_do_arquivo}`
 
 Serve os PDFs gerados pelo proprio usuario autenticado.
@@ -584,7 +674,9 @@ curl \
 7. `GET /users/me/status`
 8. `POST /processar`
 9. `GET /users/me/gap-history`
-10. `GET /users/me/files/{nome_do_arquivo}`
+10. `POST /users/me/development-plan/generate`
+11. `GET /users/me/development-plan/active`
+12. `GET /users/me/files/{nome_do_arquivo}`
 
 ## Recuperacao de usuario em outro dispositivo
 
@@ -624,6 +716,7 @@ Em producao, os dados de negocio ficam em colecoes MongoDB separadas por `user_i
 - `embedding_chunks`
 - `processing_runs`
 - `job_analysis_insights`
+- `development_plans`
 - `generated_files`
 
 Arquivos gerados para download continuam em:
