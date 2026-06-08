@@ -65,6 +65,7 @@ curl http://localhost:8000/health
 ### `POST /auth/register`
 
 Cria um novo usuario persistido no servidor e devolve um token JWT de acesso.
+O body deve enviar `terms_accepted=true`; sem esse aceite a API retorna `400`.
 
 ### Body esperado
 
@@ -72,7 +73,8 @@ Cria um novo usuario persistido no servidor e devolve um token JWT de acesso.
 {
   "display_name": "Adriano Lima",
   "email": "adriano@email.com",
-  "password": "senha-forte-123"
+  "password": "senha-forte-123",
+  "terms_accepted": true
 }
 ```
 
@@ -81,7 +83,7 @@ Cria um novo usuario persistido no servidor e devolve um token JWT de acesso.
 ```bash
 curl -X POST \
   -H "Content-Type: application/json" \
-  -d "{\"display_name\":\"Adriano Lima\",\"email\":\"adriano@email.com\",\"password\":\"senha-forte-123\"}" \
+  -d "{\"display_name\":\"Adriano Lima\",\"email\":\"adriano@email.com\",\"password\":\"senha-forte-123\",\"terms_accepted\":true}" \
   http://localhost:8000/auth/register
 ```
 
@@ -95,6 +97,8 @@ curl -X POST \
     "user_id": "user_123abc456def",
     "email": "adriano@email.com",
     "display_name": "Adriano Lima",
+    "terms_accepted": true,
+    "terms_accepted_at": "2026-06-08T12:00:00+00:00",
     "created_at": "2026-04-27T18:30:00+00:00",
     "updated_at": "2026-04-27T18:30:00+00:00"
   }
@@ -190,6 +194,21 @@ curl \
 ### `GET /users/me`
 
 Retorna o `user_id` resolvido pela autenticacao atual e, quando existir, tambem `email` e `display_name`.
+Tambem retorna `terms_accepted` e `terms_accepted_at` para o app decidir se precisa mostrar o termo para contas existentes.
+
+### `POST /users/me/terms/accept`
+
+Registra o aceite do termo de uso para o usuario autenticado. Deve ser chamado quando `terms_accepted=false`.
+
+Body esperado:
+
+```json
+{
+  "accepted": true
+}
+```
+
+Contas reais sem aceite recebem `403` nos endpoints protegidos de uso ate registrar o aceite.
 
 ### Exemplo
 
@@ -668,15 +687,16 @@ curl \
 1. `GET /health`
 2. `POST /auth/register` ou `POST /auth/login`
 3. `GET /auth/me`
-4. `GET /users/me/status`
-5. `POST /users/me/upload-cv`
-6. `POST /users/me/rebuild-embeddings`
-7. `GET /users/me/status`
-8. `POST /processar`
-9. `GET /users/me/gap-history`
-10. `POST /users/me/development-plan/generate`
-11. `GET /users/me/development-plan/active`
-12. `GET /users/me/files/{nome_do_arquivo}`
+4. `POST /users/me/terms/accept` quando `terms_accepted=false`
+5. `GET /users/me/status`
+6. `POST /users/me/upload-cv`
+7. `POST /users/me/rebuild-embeddings`
+8. `GET /users/me/status`
+9. `POST /processar`
+10. `GET /users/me/gap-history`
+11. `POST /users/me/development-plan/generate`
+12. `GET /users/me/development-plan/active`
+13. `GET /users/me/files/{nome_do_arquivo}`
 
 ## Recuperacao de usuario em outro dispositivo
 

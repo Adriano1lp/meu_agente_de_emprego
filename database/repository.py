@@ -25,6 +25,7 @@ def initialize_database(database_path: Path = DATABASE_PATH) -> Path:
     with sqlite3.connect(database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(schema)
+        _ensure_terms_columns(connection)
         connection.commit()
 
     return database_path
@@ -55,9 +56,13 @@ def create_user(user: dict[str, Any]) -> None:
         connection.execute(
             """
             INSERT INTO users (
-                user_id, email, display_name, password_hash, created_at, updated_at
+                user_id, email, display_name, password_hash, terms_accepted,
+                terms_accepted_at, created_at, updated_at
             )
-            VALUES (:user_id, :email, :display_name, :password_hash, :created_at, :updated_at)
+            VALUES (
+                :user_id, :email, :display_name, :password_hash, :terms_accepted,
+                :terms_accepted_at, :created_at, :updated_at
+            )
             """,
             user,
         )
@@ -78,8 +83,8 @@ def ensure_user_exists(user_id: str) -> None:
 
         connection.execute(
             """
-            INSERT INTO users (user_id, email, display_name, password_hash)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO users (user_id, email, display_name, password_hash, terms_accepted)
+            VALUES (?, ?, ?, ?, 0)
             """,
             (
                 user_id,
@@ -97,7 +102,8 @@ def get_user_by_email(email: str) -> dict[str, Any] | None:
     with _connect() as connection:
         row = connection.execute(
             """
-            SELECT user_id, email, display_name, password_hash, created_at, updated_at
+            SELECT user_id, email, display_name, password_hash, terms_accepted,
+                terms_accepted_at, created_at, updated_at
             FROM users
             WHERE email = ? AND deleted_at IS NULL
             """,
@@ -113,7 +119,33 @@ def get_user_by_id(user_id: str) -> dict[str, Any] | None:
     with _connect() as connection:
         row = connection.execute(
             """
-            SELECT user_id, email, display_name, password_hash, created_at, updated_at
+            SELECT user_id, email, display_name, password_hash, terms_accepted,
+                terms_accepted_at, created_at, updated_at
+            FROM users
+            WHERE user_id = ? AND deleted_at IS NULL
+            """,
+            (user_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def accept_user_terms(user_id: str, accepted_at: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.accept_user_terms(user_id, accepted_at)
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            UPDATE users
+            SET terms_accepted = 1, terms_accepted_at = ?, updated_at = ?
+            WHERE user_id = ? AND deleted_at IS NULL
+            """,
+            (accepted_at, accepted_at, user_id),
+        )
+        row = connection.execute(
+            """
+            SELECT user_id, email, display_name, password_hash, terms_accepted,
+                terms_accepted_at, created_at, updated_at
             FROM users
             WHERE user_id = ? AND deleted_at IS NULL
             """,
@@ -587,6 +619,19 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     return dict(row)
+
+
+def _ensure_terms_columns(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in connection.execute("PRAGMA table_info(users)").fetchall()
+    }
+    if "terms_accepted" not in columns:
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN terms_accepted INTEGER NOT NULL DEFAULT 0",
+        )
+    if "terms_accepted_at" not in columns:
+        connection.execute("ALTER TABLE users ADD COLUMN terms_accepted_at TEXT")
 
 
 def _json_or_none(value: Any) -> str | None:
