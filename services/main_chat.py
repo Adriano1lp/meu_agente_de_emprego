@@ -292,26 +292,31 @@ prompt_curriculo_otimizado = PromptTemplate(
 
 prompt_resposta_usuario = PromptTemplate(
     template="""
-        Voce e um especialista em carreira e recrutamento.
+        Voce e um analista de aderencia profissional para o candidato.
 
         Entradas:
         - Dados da vaga: {vaga}
         - Analise de matching: {matching}
 
         Objetivo:
-        Gerar uma resposta clara e objetiva para o candidato explicando o quao aderente ele esta a vaga.
+        Gerar uma resposta clara e objetiva sobre a compatibilidade do perfil com a vaga.
 
         Formato da resposta:
-        - Um resumo do nivel de aderencia.
-        - Principais pontos fortes.
-        - Principais lacunas.
-        - Recomendacoes praticas para melhorar o fit.
+        - Percentual de match com a vaga.
+        - Pontos fortes do candidato em relacao a vaga.
+        - Pontos fracos ou lacunas do candidato em relacao a vaga.
+        - Recomendacoes praticas para melhorar a aderencia.
 
         Regras:
         - Linguagem simples e direta.
         - Sem JSON.
         - Sem termos tecnicos desnecessarios.
         - Seja honesto, mas construtivo.
+        - Nao aja como recrutador ou representante da empresa.
+        - Nao agradeca candidatura.
+        - Nao convide para entrevista.
+        - Nao aprove nem reprove o candidato.
+        - Nao use frases como "Obrigado por se candidatar".
 
         Resposta:
     """,
@@ -391,7 +396,7 @@ def pipeline_with_details(vaga_texto: str, user_id: str) -> dict[str, object]:
     if match_score < MINIMUM_MATCH_SCORE_TO_GENERATE_CURRICULUM:
         return {
             "curriculo": None,
-            "resposta_usuario": _build_low_match_response(match_score, matching),
+            "resposta_usuario": _build_job_analysis_response(match_score, matching),
             "vaga": vaga_struct,
             "matching": matching,
             "otimizacao": {
@@ -403,9 +408,7 @@ def pipeline_with_details(vaga_texto: str, user_id: str) -> dict[str, object]:
         }
 
     otimizacao = cadeia_3.invoke({"vaga": vaga_struct, "matching": matching})
-    resposta_usuario = cadeia_resposta.invoke(
-        {"vaga": vaga_struct, "matching": matching},
-    )
+    resposta_usuario = _build_job_analysis_response(match_score, matching)
     curriculo = cadeia_4.invoke(
         {
             "contexto": contexto,
@@ -497,30 +500,56 @@ def _extract_match_score(matching: object) -> int:
     return max(0, min(100, score))
 
 
-def _build_low_match_response(match_score: int, matching: object) -> str:
+def _build_job_analysis_response(match_score: int, matching: object) -> str:
     gaps = _extract_list_field(matching, "gaps_criticos")
     missing_skills = _extract_list_field(matching, "missing_skills")
     strengths = _extract_list_field(matching, "pontos_fortes")
+    combined_gaps = _dedupe_items([*gaps, *missing_skills])
     lines = [
-        f"Sua adesao a esta vaga ficou em {match_score}%.",
-        (
-            "Com um resultado abaixo de 60%, nao recomendo a candidatura para esta vaga, "
-            "pois a baixa compatibilidade pode indicar que o processo seletivo nao avancara muito ou que o candidato nao tem as qualificacoes basicas requeridas."
-        ),
+        f"Percentual de match com a vaga: {match_score}%.",
+        _build_match_summary(match_score),
     ]
 
     if strengths:
-        lines.append("Pontos fortes identificados: " + "; ".join(strengths[:5]) + ".")
+        lines.append("Pontos fortes: " + "; ".join(strengths[:5]) + ".")
+    else:
+        lines.append("Pontos fortes: nenhum ponto forte especifico foi identificado nos dados analisados.")
 
-    combined_gaps = [*gaps, *missing_skills]
     if combined_gaps:
-        lines.append("Principais lacunas: " + "; ".join(combined_gaps[:6]) + ".")
+        lines.append("Pontos fracos ou lacunas: " + "; ".join(combined_gaps[:6]) + ".")
+    else:
+        lines.append("Pontos fracos ou lacunas: nenhuma lacuna critica foi identificada nos dados analisados.")
 
     lines.append(
-        "Recomendacao: priorize vagas mais proximas do seu perfil ou atualize o curriculo "
-        "com experiencias reais relacionadas aos requisitos antes de tentar novamente."
+        "Recomendacoes praticas: ajuste o curriculo com experiencias reais relacionadas aos requisitos, "
+        "reforce palavras-chave aderentes e priorize o desenvolvimento das lacunas listadas."
     )
     return "\n\n".join(lines)
+
+
+def _build_low_match_response(match_score: int, matching: object) -> str:
+    return _build_job_analysis_response(match_score, matching)
+
+
+def _build_match_summary(match_score: int) -> str:
+    if match_score < MINIMUM_MATCH_SCORE_TO_GENERATE_CURRICULUM:
+        return (
+            "Resumo: a aderencia esta abaixo do minimo usado pelo sistema para gerar "
+            "curriculo otimizado e PDF."
+        )
+    return "Resumo: a aderencia atende ao minimo usado pelo sistema para gerar curriculo otimizado e PDF."
+
+
+def _dedupe_items(items: list[str]) -> list[str]:
+    unique_items: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = item.strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_items.append(item.strip())
+    return unique_items
 
 
 def _extract_list_field(source: object, field_name: str) -> list[str]:

@@ -35,7 +35,13 @@ from services.main_chat import generate_cover_letter, pipeline_with_details
 from services.main_carta import gerar_pdf_carta_apresentacao
 from services.main_curriculo import gerar_pdf_profissional
 from services.main_rag import rebuild_vectorstore_for_user
-from services.auth_users import authenticate_user, get_user_by_id, register_user
+from services.auth_users import (
+    accept_terms_for_user,
+    authenticate_user,
+    get_user_by_id,
+    register_user,
+    user_can_access_terms_protected_routes,
+)
 from services.development_plan import (
     DEFAULT_ANALYSIS_LIMIT,
     MAX_ANALYSIS_LIMIT,
@@ -115,11 +121,16 @@ class AuthRegisterRequest(BaseModel):
     display_name: str
     email: str
     password: str
+    terms_accepted: bool = False
 
 
 class AuthLoginRequest(BaseModel):
     email: str
     password: str
+
+
+class TermsAcceptanceRequest(BaseModel):
+    accepted: bool
 
 
 def _read_authorization_header(
@@ -141,6 +152,18 @@ def _require_authorization_header(
     return token.strip()
 
 
+def _require_terms_accepted(user_id: str = Depends(get_current_user_id)) -> str:
+    can_access = user_can_access_terms_protected_routes(user_id)
+    if can_access is None:
+        return user_id
+    if not can_access:
+        raise HTTPException(
+            status_code=403,
+            detail="Aceite do termo de uso obrigatorio",
+        )
+    return user_id
+
+
 @app.get("/health")
 def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
@@ -152,6 +175,7 @@ def auth_register(payload: AuthRegisterRequest) -> dict[str, Any]:
         display_name=payload.display_name,
         email=payload.email,
         password=payload.password,
+        terms_accepted=payload.terms_accepted,
     )
     token = create_access_token(
         user_id=user["user_id"],
@@ -195,11 +219,13 @@ def auth_me(authorization: str = Depends(_require_authorization_header)) -> dict
 
 
 @app.get("/users/me")
-def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict[str, str]:
+def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict[str, Any]:
     user = get_user_by_id(user_id)
     response = {
         "user_id": user_id,
         "auth_mode": AUTH_MODE,
+        "terms_accepted": bool(user.get("terms_accepted")) if user else False,
+        "terms_accepted_at": user.get("terms_accepted_at") if user else None,
     }
     if user:
         response["email"] = user["email"]
@@ -207,10 +233,20 @@ def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict[str, s
     return response
 
 
+@app.post("/users/me/terms/accept")
+def accept_current_user_terms(
+    payload: TermsAcceptanceRequest,
+    user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    if not payload.accepted:
+        raise HTTPException(status_code=400, detail="Aceite do termo de uso obrigatorio")
+    return accept_terms_for_user(user_id)
+
+
 @app.post("/users/me/upload-cv")
 def upload_cv(
     file: UploadFile = File(...),
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(_require_terms_accepted),
 ) -> dict[str, Any]:
     return save_user_cv(file, user_id)
 
@@ -218,7 +254,7 @@ def upload_cv(
 @app.post("/users/me/profile")
 def upsert_profile(
     profile: UserProfileRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(_require_terms_accepted),
 ) -> dict[str, Any]:
     profile_payload = _build_profile_payload(profile)
     if not profile_payload:
@@ -228,7 +264,7 @@ def upsert_profile(
 
 
 @app.get("/users/me/profile")
-def read_profile(user_id: str = Depends(get_current_user_id)) -> dict[str, Any]:
+def read_profile(user_id: str = Depends(_require_terms_accepted)) -> dict[str, Any]:
     profile = get_user_profile(user_id)
     if not profile:
         return {
@@ -270,14 +306,14 @@ def read_user_status(user_id: str = Depends(get_current_user_id)) -> dict[str, A
 
 
 @app.post("/users/me/rebuild-embeddings")
-def rebuild_embeddings(user_id: str = Depends(get_current_user_id)) -> dict[str, Any]:
+def rebuild_embeddings(user_id: str = Depends(_require_terms_accepted)) -> dict[str, Any]:
     return rebuild_vectorstore_for_user(user_id)
 
 
 @app.get("/users/me/files/{file_name}")
 def download_user_file(
     file_name: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(_require_terms_accepted),
 ) -> FileResponse:
     safe_file_name = Path(file_name).name
     if safe_file_name != file_name:
@@ -296,7 +332,7 @@ def download_user_file(
 
 @app.get("/users/me/gap-history")
 def read_gap_history(
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(_require_terms_accepted),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -310,7 +346,7 @@ def read_gap_history(
 @app.post("/users/me/development-plan/generate")
 def generate_user_development_plan(
     payload: DevelopmentPlanGenerateRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(_require_terms_accepted),
 ) -> dict[str, Any]:
     return generate_development_plan(
         user_id=user_id,
@@ -321,7 +357,7 @@ def generate_user_development_plan(
 
 @app.get("/users/me/development-plan/active")
 def read_user_active_development_plan(
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(_require_terms_accepted),
 ) -> dict[str, Any]:
     plan = read_active_development_plan(user_id)
     return {
@@ -332,7 +368,7 @@ def read_user_active_development_plan(
 
 @app.get("/users/me/development-plans")
 def read_user_development_plans(
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(_require_terms_accepted),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -352,7 +388,7 @@ def update_user_development_plan_item(
     pdi_id: str,
     item_id: str,
     payload: DevelopmentPlanItemStatusRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(_require_terms_accepted),
 ) -> dict[str, Any]:
     return update_development_plan_item_status(
         user_id=user_id,
@@ -366,7 +402,7 @@ def update_user_development_plan_item(
 def processar(
     request_data: RequestData,
     request: Request,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(_require_terms_accepted),
 ) -> dict[str, Any]:
     texto_entrada = request_data.texto.strip()
     if not texto_entrada:
@@ -476,14 +512,17 @@ def processar(
                 "completed_at": _utc_now_iso(),
             },
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail="Erro interno ao processar a vaga",
+        ) from exc
 
 
 @app.post("/users/me/cover-letter")
 def generate_user_cover_letter(
     payload: CoverLetterRequest,
     request: Request,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(_require_terms_accepted),
 ) -> dict[str, str]:
     empresa = payload.empresa.strip()
     if not empresa:
@@ -543,7 +582,10 @@ def generate_user_cover_letter(
                 "completed_at": _utc_now_iso(),
             },
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail="Erro interno ao gerar carta de apresentacao",
+        ) from exc
 
 
 def _build_public_file_url(request: Request, file_name: str) -> str:

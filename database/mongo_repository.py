@@ -39,6 +39,8 @@ def ensure_user_exists(user_id: str) -> None:
                 "email": f"{user_id}@local.invalid",
                 "display_name": user_id,
                 "password_hash": "legacy_external_auth",
+                "terms_accepted": False,
+                "terms_accepted_at": None,
                 "created_at": now,
                 "updated_at": now,
                 "deleted_at": None,
@@ -58,6 +60,25 @@ def get_user_by_email(email: str) -> dict[str, Any] | None:
 
 def get_user_by_id(user_id: str) -> dict[str, Any] | None:
     user = _get_collection("users").find_one(
+        {"user_id": user_id, "deleted_at": None},
+        {"_id": 0},
+    )
+    return dict(user) if user else None
+
+
+def accept_user_terms(user_id: str, accepted_at: str) -> dict[str, Any] | None:
+    users = _get_collection("users")
+    users.update_one(
+        {"user_id": user_id, "deleted_at": None},
+        {
+            "$set": {
+                "terms_accepted": True,
+                "terms_accepted_at": accepted_at,
+                "updated_at": accepted_at,
+            },
+        },
+    )
+    user = users.find_one(
         {"user_id": user_id, "deleted_at": None},
         {"_id": 0},
     )

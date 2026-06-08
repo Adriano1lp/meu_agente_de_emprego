@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from config import sanitize_user_id
 from database.repository import (
+    accept_user_terms,
     create_user,
     get_user_by_email,
     get_user_by_id as find_user_by_id,
@@ -24,6 +25,7 @@ def register_user(
     display_name: str,
     email: str,
     password: str,
+    terms_accepted: bool,
 ) -> dict[str, Any]:
     normalized_email = _normalize_email(email)
     display_name = display_name.strip()
@@ -31,6 +33,8 @@ def register_user(
         raise HTTPException(status_code=400, detail="Nome obrigatorio")
 
     _validate_password(password)
+    if not terms_accepted:
+        raise HTTPException(status_code=400, detail="Aceite do termo de uso obrigatorio")
 
     if get_user_by_email(normalized_email):
         raise HTTPException(status_code=409, detail="Email ja cadastrado")
@@ -42,6 +46,8 @@ def register_user(
         "email": normalized_email,
         "display_name": display_name,
         "password_hash": _hash_password(password),
+        "terms_accepted": True,
+        "terms_accepted_at": now,
         "created_at": now,
         "updated_at": now,
     }
@@ -68,6 +74,24 @@ def get_user_by_id(user_id: str) -> dict[str, Any] | None:
     safe_user_id = sanitize_user_id(user_id)
     user = find_user_by_id(safe_user_id)
     return _public_user(user) if user else None
+
+
+def user_can_access_terms_protected_routes(user_id: str) -> bool | None:
+    safe_user_id = sanitize_user_id(user_id)
+    user = find_user_by_id(safe_user_id)
+    if not user:
+        return None
+    if user.get("password_hash") == "legacy_external_auth":
+        return True
+    return bool(user.get("terms_accepted"))
+
+
+def accept_terms_for_user(user_id: str) -> dict[str, Any]:
+    safe_user_id = sanitize_user_id(user_id)
+    user = accept_user_terms(safe_user_id, _utc_now_iso())
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario nao encontrado")
+    return _public_user(user)
 
 
 def _normalize_email(email: str) -> str:
@@ -130,6 +154,8 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
         "user_id": user["user_id"],
         "email": user["email"],
         "display_name": user["display_name"],
+        "terms_accepted": bool(user.get("terms_accepted")),
+        "terms_accepted_at": user.get("terms_accepted_at"),
         "created_at": user.get("created_at"),
         "updated_at": user.get("updated_at"),
     }
