@@ -50,7 +50,12 @@ from services.development_plan import (
     read_development_plan_history,
     update_development_plan_item_status,
 )
-from services.user_data import get_user_profile, save_user_cv, save_user_profile
+from services.user_data import (
+    get_user_profile,
+    save_manual_profile,
+    save_user_cv,
+    save_user_profile,
+)
 
 ensure_runtime_config()
 
@@ -96,6 +101,47 @@ class UserProfileRequest(BaseModel):
     objetivos: list[str] = Field(default_factory=list)
     experiencias: list[str] = Field(default_factory=list)
     formacao: list[str] = Field(default_factory=list)
+
+
+class ManualEducationRequest(BaseModel):
+    instituicao: str
+    curso: str
+    grau: str | None = None
+    ano_inicio: str | None = None
+    ano_conclusao: str | None = None
+    status: str | None = None
+    detalhes: str | None = None
+
+
+class ManualExperienceRequest(BaseModel):
+    empresa: str
+    cargo: str
+    area: str | None = None
+    data_inicio: str | None = None
+    data_fim: str | None = None
+    emprego_atual: bool = False
+    atividades: str
+    responsabilidades: str | None = None
+    resultados: str | None = None
+    ferramentas: str | None = None
+    palavras_chave: str | None = None
+
+
+class ManualProfileRequest(BaseModel):
+    titulo_profissional: str | None = None
+    resumo_profissional: str | None = None
+    objetivos_profissionais: str | None = None
+    senioridade: str | None = None
+    modelo_trabalho: str | None = None
+    disponibilidade: str | None = None
+    formacoes: list[ManualEducationRequest] = Field(default_factory=list)
+    experiencias: list[ManualExperienceRequest] = Field(default_factory=list)
+    habilidades_tecnicas: list[str] = Field(default_factory=list)
+    ferramentas: list[str] = Field(default_factory=list)
+    idiomas: list[str] = Field(default_factory=list)
+    certificacoes: list[str] = Field(default_factory=list)
+    projetos: list[str] = Field(default_factory=list)
+    atividades_complementares: list[str] = Field(default_factory=list)
 
 
 def _has_profile_content(value: Any) -> bool:
@@ -278,6 +324,50 @@ def read_profile(user_id: str = Depends(_require_terms_accepted)) -> dict[str, A
         "exists": True,
         **profile,
     }
+
+
+@app.post("/users/me/manual-profile")
+def create_manual_profile(
+    profile: ManualProfileRequest,
+    user_id: str = Depends(_require_terms_accepted),
+) -> dict[str, Any]:
+    summary_or_goal = " ".join(
+        value.strip()
+        for value in (profile.resumo_profissional, profile.objetivos_profissionais)
+        if value and value.strip()
+    )
+    if len(summary_or_goal) < 30:
+        raise HTTPException(
+            status_code=400,
+            detail="Informe um resumo profissional ou objetivo com pelo menos 30 caracteres",
+        )
+    if not profile.formacoes and not profile.experiencias:
+        raise HTTPException(
+            status_code=400,
+            detail="Informe pelo menos uma formacao ou experiencia profissional",
+        )
+    for education in profile.formacoes:
+        if not education.instituicao.strip() or not education.curso.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Informe instituicao e curso em todas as formacoes",
+            )
+    for experience in profile.experiencias:
+        if not experience.empresa.strip() or not experience.cargo.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Informe empresa e cargo em todas as experiencias",
+            )
+        if len(experience.atividades.strip()) < 20:
+            raise HTTPException(
+                status_code=400,
+                detail="Descreva as principais atividades da experiencia com pelo menos 20 caracteres",
+            )
+
+    payload = profile.model_dump(exclude_none=True)
+    saved = save_manual_profile(payload, user_id)
+    embeddings = rebuild_vectorstore_for_user(user_id)
+    return {**saved, "embeddings": embeddings, "ready_for_analysis": True}
 
 
 @app.get("/users/me/status")

@@ -384,6 +384,39 @@ curl \
 
 ## 9. Gerar embeddings do usuario
 
+### `POST /users/me/manual-profile`
+
+Salva informacoes academicas e profissionais sem exigir upload de arquivo. A rota exige autenticacao e aceite dos termos, valida o conteudo, versiona o perfil, consolida um `cv.txt` rastreavel e reconstrói os embeddings.
+
+Regras minimas:
+
+- `resumo_profissional` e/ou `objetivos_profissionais` devem somar pelo menos 30 caracteres;
+- deve existir ao menos um item em `formacoes` ou `experiencias`;
+- cada formacao exige `instituicao` e `curso`;
+- cada experiencia exige `empresa`, `cargo` e `atividades` com pelo menos 20 caracteres.
+
+Exemplo:
+
+```json
+{
+  "titulo_profissional": "Desenvolvedor backend",
+  "resumo_profissional": "Profissional com experiencia em APIs e bancos de dados.",
+  "formacoes": [
+    {
+      "instituicao": "Universidade Exemplo",
+      "curso": "Ciencia da Computacao",
+      "ano_conclusao": "2024",
+      "status": "concluido"
+    }
+  ],
+  "experiencias": [],
+  "habilidades_tecnicas": ["Python", "SQL"],
+  "idiomas": ["Ingles avancado"]
+}
+```
+
+Resposta de sucesso inclui o perfil salvo, metadados do documento, resultado dos embeddings e `ready_for_analysis: true`.
+
 ### `POST /users/me/rebuild-embeddings`
 
 Le o curriculo do usuario, quebra o texto em chunks e persiste os embeddings.
