@@ -4,20 +4,33 @@ import base64
 import hashlib
 import hmac
 import os
-from datetime import UTC, datetime
+import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException
 
-from config import sanitize_user_id
+from config import (
+    ENVIRONMENT,
+    PASSWORD_RESET_EXPIRATION_MINUTES,
+    PASSWORD_RESET_EXPOSE_TOKEN,
+    sanitize_user_id,
+)
 from database.repository import (
     accept_user_terms,
+    create_password_reset_token,
     create_user,
+    get_password_reset_token_by_hash,
     get_user_by_email,
     get_user_by_id as find_user_by_id,
+    mark_password_reset_token_used,
+    update_user_password_hash,
 )
 
 PBKDF2_ITERATIONS = 200_000
+PASSWORD_RESET_GENERIC_MESSAGE = (
+    "Se o email estiver cadastrado, enviaremos instrucoes para recuperar a senha."
+)
 
 
 def register_user(
@@ -68,6 +81,68 @@ def authenticate_user(email: str, password: str) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="Email ou senha invalidos")
 
     return _public_user(user)
+
+
+def request_password_reset(email: str) -> dict[str, Any]:
+    normalized_email = _normalize_email(email)
+    user = get_user_by_email(normalized_email)
+    response: dict[str, Any] = {"message": PASSWORD_RESET_GENERIC_MESSAGE}
+
+    if not user:
+        return response
+
+    token = secrets.token_urlsafe(32)
+    now = _utc_now()
+    expires_at = now + timedelta(minutes=PASSWORD_RESET_EXPIRATION_MINUTES)
+    create_password_reset_token(
+        {
+            "user_id": user["user_id"],
+            "email": normalized_email,
+            "token_hash": _hash_reset_token(token),
+            "expires_at": expires_at.replace(microsecond=0).isoformat(),
+            "created_at": now.replace(microsecond=0).isoformat(),
+            "used_at": None,
+        }
+    )
+
+    if PASSWORD_RESET_EXPOSE_TOKEN or ENVIRONMENT not in {"production", "prod"}:
+        response["reset_token"] = token
+
+    return response
+
+
+def confirm_password_reset(token: str, new_password: str) -> dict[str, str]:
+    token = token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Token de recuperacao obrigatorio")
+
+    _validate_password(new_password)
+    reset_token = get_password_reset_token_by_hash(_hash_reset_token(token))
+    if not reset_token:
+        raise HTTPException(status_code=400, detail="Token de recuperacao invalido ou expirado")
+
+    if reset_token.get("used_at"):
+        raise HTTPException(status_code=400, detail="Token de recuperacao invalido ou expirado")
+
+    expires_at = _parse_iso_datetime(str(reset_token["expires_at"]))
+    if expires_at <= _utc_now():
+        raise HTTPException(status_code=400, detail="Token de recuperacao invalido ou expirado")
+
+    user_id = str(reset_token["user_id"])
+    now = _utc_now_iso()
+    updated_user = update_user_password_hash(
+        user_id=user_id,
+        password_hash=_hash_password(new_password),
+        updated_at=now,
+    )
+    if not updated_user:
+        raise HTTPException(status_code=404, detail="Usuario nao encontrado")
+
+    mark_password_reset_token_used(
+        token_hash=str(reset_token["token_hash"]),
+        used_at=now,
+    )
+    return {"message": "Senha redefinida com sucesso"}
 
 
 def get_user_by_id(user_id: str) -> dict[str, Any] | None:
@@ -149,6 +224,17 @@ def _verify_password(password: str, password_hash: str) -> bool:
     return hmac.compare_digest(computed_digest, expected_digest)
 
 
+def _hash_reset_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def _public_user(user: dict[str, Any]) -> dict[str, Any]:
     return {
         "user_id": user["user_id"],
@@ -161,5 +247,9 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 def _utc_now_iso() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat()
+    return _utc_now().replace(microsecond=0).isoformat()

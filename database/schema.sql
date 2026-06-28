@@ -20,6 +20,22 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
 
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    reset_token_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    used_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
+    ON password_reset_tokens (user_id);
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at
+    ON password_reset_tokens (expires_at);
 CREATE TABLE IF NOT EXISTS user_profiles (
     profile_id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL UNIQUE,

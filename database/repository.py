@@ -13,12 +13,12 @@ API_DIR = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = API_DIR / "database" / "schema.sql"
 
 
-def initialize_database(database_path: Path = DATABASE_PATH) -> Path:
+def initialize_database(database_path: Path | None = None) -> Path:
     if _use_mongodb():
         mongo_repository.initialize_database()
-        return database_path.resolve()
+        return (database_path or DATABASE_PATH).resolve()
 
-    database_path = database_path.resolve()
+    database_path = (database_path or DATABASE_PATH).resolve()
     database_path.parent.mkdir(parents=True, exist_ok=True)
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
 
@@ -153,6 +153,94 @@ def accept_user_terms(user_id: str, accepted_at: str) -> dict[str, Any] | None:
         ).fetchone()
         return _row_to_dict(row)
 
+
+def update_user_password_hash(
+    *,
+    user_id: str,
+    password_hash: str,
+    updated_at: str,
+) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.update_user_password_hash(
+            user_id=user_id,
+            password_hash=password_hash,
+            updated_at=updated_at,
+        )
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            UPDATE users
+            SET password_hash = ?, updated_at = ?
+            WHERE user_id = ? AND deleted_at IS NULL
+            """,
+            (password_hash, updated_at, user_id),
+        )
+        row = connection.execute(
+            """
+            SELECT user_id, email, display_name, password_hash, terms_accepted,
+                terms_accepted_at, created_at, updated_at
+            FROM users
+            WHERE user_id = ? AND deleted_at IS NULL
+            """,
+            (user_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def create_password_reset_token(token_data: dict[str, Any]) -> None:
+    if _use_mongodb():
+        mongo_repository.create_password_reset_token(token_data)
+        return
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO password_reset_tokens (
+                user_id, email, token_hash, expires_at, created_at, used_at
+            )
+            VALUES (
+                :user_id, :email, :token_hash, :expires_at, :created_at, :used_at
+            )
+            """,
+            token_data,
+        )
+
+
+def get_password_reset_token_by_hash(token_hash: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_password_reset_token_by_hash(token_hash)
+
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT reset_token_id, user_id, email, token_hash, expires_at,
+                created_at, used_at
+            FROM password_reset_tokens
+            WHERE token_hash = ?
+            """,
+            (token_hash,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def mark_password_reset_token_used(*, token_hash: str, used_at: str) -> None:
+    if _use_mongodb():
+        mongo_repository.mark_password_reset_token_used(
+            token_hash=token_hash,
+            used_at=used_at,
+        )
+        return
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            UPDATE password_reset_tokens
+            SET used_at = ?
+            WHERE token_hash = ? AND used_at IS NULL
+            """,
+            (used_at, token_hash),
+        )
 
 def upsert_user_profile(user_id: str, version: int, profile_data: dict[str, Any]) -> None:
     if _use_mongodb():

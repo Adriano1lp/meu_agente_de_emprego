@@ -41,6 +41,13 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 AUTH_MODE = os.getenv("AUTH_MODE", "jwt").strip().lower() or "jwt"
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me").strip()
 JWT_EXPIRATION_MINUTES = int(os.getenv("JWT_EXPIRATION_MINUTES", "10080"))
+PASSWORD_RESET_EXPIRATION_MINUTES = int(
+    os.getenv("PASSWORD_RESET_EXPIRATION_MINUTES", "30")
+)
+PASSWORD_RESET_EXPOSE_TOKEN = (
+    os.getenv("PASSWORD_RESET_EXPOSE_TOKEN", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))
 CORS_ALLOW_ORIGINS = [
     origin.strip()

@@ -85,6 +85,42 @@ def accept_user_terms(user_id: str, accepted_at: str) -> dict[str, Any] | None:
     return dict(user) if user else None
 
 
+def update_user_password_hash(
+    *,
+    user_id: str,
+    password_hash: str,
+    updated_at: str,
+) -> dict[str, Any] | None:
+    users = _get_collection("users")
+    users.update_one(
+        {"user_id": user_id, "deleted_at": None},
+        {"$set": {"password_hash": password_hash, "updated_at": updated_at}},
+    )
+    user = users.find_one(
+        {"user_id": user_id, "deleted_at": None},
+        {"_id": 0},
+    )
+    return dict(user) if user else None
+
+
+def create_password_reset_token(token_data: dict[str, Any]) -> None:
+    _get_collection("password_reset_tokens").insert_one(token_data)
+
+
+def get_password_reset_token_by_hash(token_hash: str) -> dict[str, Any] | None:
+    token = _get_collection("password_reset_tokens").find_one(
+        {"token_hash": token_hash},
+        {"_id": 0},
+    )
+    return dict(token) if token else None
+
+
+def mark_password_reset_token_used(*, token_hash: str, used_at: str) -> None:
+    _get_collection("password_reset_tokens").update_one(
+        {"token_hash": token_hash, "used_at": None},
+        {"$set": {"used_at": used_at}},
+    )
+
 def upsert_user_profile(user_id: str, version: int, profile_data: dict[str, Any]) -> None:
     ensure_user_exists(user_id)
     now = _utc_now_iso()
@@ -381,6 +417,9 @@ def _ensure_indexes(database: Any) -> None:
 
     database.users.create_index("email", unique=True)
     database.users.create_index("user_id", unique=True)
+    database.password_reset_tokens.create_index("token_hash", unique=True)
+    database.password_reset_tokens.create_index([("user_id", 1), ("created_at", -1)])
+    database.password_reset_tokens.create_index("expires_at")
     database.user_profiles.create_index("user_id", unique=True)
     database.user_profile_versions.create_index(
         [("user_id", 1), ("version", 1)],

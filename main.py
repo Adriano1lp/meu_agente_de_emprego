@@ -38,8 +38,10 @@ from services.main_rag import rebuild_vectorstore_for_user
 from services.auth_users import (
     accept_terms_for_user,
     authenticate_user,
+    confirm_password_reset,
     get_user_by_id,
     register_user,
+    request_password_reset,
     user_can_access_terms_protected_routes,
 )
 from services.development_plan import (
@@ -175,6 +177,15 @@ class AuthLoginRequest(BaseModel):
     password: str
 
 
+class PasswordResetRequest(BaseModel):
+    email: str
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str
+    new_password: str
+
+
 class TermsAcceptanceRequest(BaseModel):
     accepted: bool
 
@@ -248,6 +259,16 @@ def auth_login(payload: AuthLoginRequest) -> dict[str, Any]:
         "token_type": "bearer",
         "user": user,
     }
+
+
+@app.post("/auth/password-reset/request")
+def auth_password_reset_request(payload: PasswordResetRequest) -> dict[str, Any]:
+    return request_password_reset(payload.email)
+
+
+@app.post("/auth/password-reset/confirm")
+def auth_password_reset_confirm(payload: PasswordResetConfirmRequest) -> dict[str, str]:
+    return confirm_password_reset(payload.token, payload.new_password)
 
 
 @app.get("/auth/me")
