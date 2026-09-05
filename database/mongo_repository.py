@@ -47,6 +47,10 @@ def ensure_user_exists(user_id: str) -> None:
                 "privacy_accepted": False,
                 "privacy_accepted_at": None,
                 "privacy_version": None,
+                "stripe_customer_id": None,
+                "stripe_subscription_id": None,
+                "plan": "free",
+                "subscription_status": "none",
                 "created_at": now,
                 "updated_at": now,
                 "deleted_at": None,
@@ -446,6 +450,123 @@ def count_generated_files(user_id: str) -> int:
     return int(_get_collection("generated_files").count_documents({"user_id": user_id}))
 
 
+def update_user_billing(
+    user_id: str,
+    *,
+    stripe_customer_id: str | None = None,
+    stripe_subscription_id: str | None = None,
+    plan: str | None = None,
+    subscription_status: str | None = None,
+    updated_at: str,
+    clear_subscription_id: bool = False,
+) -> dict[str, Any] | None:
+    fields: dict[str, Any] = {"updated_at": updated_at}
+    if stripe_customer_id is not None:
+        fields["stripe_customer_id"] = stripe_customer_id
+    if clear_subscription_id:
+        fields["stripe_subscription_id"] = None
+    elif stripe_subscription_id is not None:
+        fields["stripe_subscription_id"] = stripe_subscription_id
+    if plan is not None:
+        fields["plan"] = plan
+    if subscription_status is not None:
+        fields["subscription_status"] = subscription_status
+
+    users = _get_collection("users")
+    users.update_one(
+        {"user_id": user_id, "deleted_at": None},
+        {"$set": fields},
+    )
+    user = users.find_one(
+        {"user_id": user_id, "deleted_at": None},
+        {"_id": 0},
+    )
+    return dict(user) if user else None
+
+
+def get_user_by_stripe_customer_id(customer_id: str) -> dict[str, Any] | None:
+    user = _get_collection("users").find_one(
+        {"stripe_customer_id": customer_id, "deleted_at": None},
+        {"_id": 0},
+    )
+    return dict(user) if user else None
+
+
+def get_user_by_stripe_subscription_id(subscription_id: str) -> dict[str, Any] | None:
+    user = _get_collection("users").find_one(
+        {"stripe_subscription_id": subscription_id, "deleted_at": None},
+        {"_id": 0},
+    )
+    return dict(user) if user else None
+
+
+def get_processar_usage(user_id: str, period: str) -> int:
+    document = _get_collection("processar_usage").find_one(
+        {"user_id": user_id, "period": period},
+        {"_id": 0, "used": 1},
+    )
+    return int(document["used"]) if document else 0
+
+
+def consume_processar_usage(user_id: str, *, period: str, limit: int) -> dict[str, Any]:
+    try:
+        from pymongo import ReturnDocument
+        from pymongo.errors import DuplicateKeyError
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dependencia pymongo nao instalada. Execute pip install -r requirements.txt."
+        ) from exc
+
+    ensure_user_exists(user_id)
+    collection = _get_collection("processar_usage")
+    now = _utc_now_iso()
+    document = collection.find_one_and_update(
+        {"user_id": user_id, "period": period, "used": {"$lt": limit}},
+        {"$inc": {"used": 1}, "$set": {"updated_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if document:
+        return {"allowed": True, "used": int(document["used"])}
+
+    existing = collection.find_one({"user_id": user_id, "period": period})
+    if existing:
+        return {"allowed": False, "used": int(existing.get("used") or 0)}
+
+    try:
+        collection.insert_one(
+            {
+                "user_id": user_id,
+                "period": period,
+                "used": 1,
+                "updated_at": now,
+            }
+        )
+        return {"allowed": True, "used": 1}
+    except DuplicateKeyError:
+        return consume_processar_usage(user_id, period=period, limit=limit)
+
+
+def claim_stripe_webhook_event(event_id: str, event_type: str) -> bool:
+    try:
+        from pymongo.errors import DuplicateKeyError
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dependencia pymongo nao instalada. Execute pip install -r requirements.txt."
+        ) from exc
+
+    try:
+        _get_collection("stripe_webhook_events").insert_one(
+            {
+                "event_id": event_id,
+                "event_type": event_type,
+                "processed_at": _utc_now_iso(),
+            }
+        )
+        return True
+    except DuplicateKeyError:
+        return False
+
+
 def collect_user_export_payload(user_id: str) -> dict[str, Any]:
     user = get_user_by_id(user_id)
     if not user:
@@ -491,6 +612,18 @@ def collect_user_export_payload(user_id: str) -> dict[str, Any]:
             sort=[("created_at", 1)],
         )
     ]
+    usage = [
+        {
+            "period": document.get("period"),
+            "used": int(document.get("used") or 0),
+            "updated_at": document.get("updated_at"),
+        }
+        for document in _get_collection("processar_usage").find(
+            {"user_id": user_id},
+            {"_id": 0, "period": 1, "used": 1, "updated_at": 1},
+            sort=[("period", 1)],
+        )
+    ]
     return {
         "user": user,
         "profile": profile,
@@ -503,6 +636,7 @@ def collect_user_export_payload(user_id: str) -> dict[str, Any]:
         "development_plans": list_development_plans(user_id, limit=1000, offset=0),
         "documents": documents,
         "generated_files": generated_files,
+        "processar_usage": usage,
     }
 
 
@@ -522,6 +656,7 @@ def anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
         "user_profile_versions",
         "user_profiles",
         "password_reset_tokens",
+        "processar_usage",
     ):
         _get_collection(collection_name).delete_many({"user_id": user_id})
 
@@ -532,6 +667,10 @@ def anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
                 "email": f"deleted+{user_id}@invalid.local",
                 "display_name": "Conta excluida",
                 "password_hash": "deleted_account",
+                "stripe_customer_id": None,
+                "stripe_subscription_id": None,
+                "plan": "free",
+                "subscription_status": "none",
                 "updated_at": deleted_at,
                 "deleted_at": deleted_at,
             },
@@ -580,6 +719,8 @@ def _ensure_indexes(database: Any) -> None:
 
     database.users.create_index("email", unique=True)
     database.users.create_index("user_id", unique=True)
+    database.users.create_index("stripe_customer_id")
+    database.users.create_index("stripe_subscription_id")
     database.consent_log.create_index([("user_id", 1), ("accepted_at", 1)])
     database.password_reset_tokens.create_index("token_hash", unique=True)
     database.password_reset_tokens.create_index([("user_id", 1), ("created_at", -1)])
@@ -605,6 +746,11 @@ def _ensure_indexes(database: Any) -> None:
         unique=True,
     )
     database.generated_files.create_index([("user_id", 1), ("created_at", -1)])
+    database.processar_usage.create_index(
+        [("user_id", 1), ("period", 1)],
+        unique=True,
+    )
+    database.stripe_webhook_events.create_index("event_id", unique=True)
     _indexes_ready = True
 
 

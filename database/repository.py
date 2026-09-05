@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -14,7 +15,8 @@ SCHEMA_PATH = API_DIR / "database" / "schema.sql"
 USER_COLUMNS = """
     user_id, email, display_name, password_hash, terms_accepted,
     terms_accepted_at, terms_version, privacy_accepted, privacy_accepted_at,
-    privacy_version, created_at, updated_at
+    privacy_version, stripe_customer_id, stripe_subscription_id, plan,
+    subscription_status, created_at, updated_at
 """
 
 
@@ -31,6 +33,7 @@ def initialize_database(database_path: Path | None = None) -> Path:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(schema)
         _ensure_consent_columns(connection)
+        _ensure_billing_schema(connection)
         connection.commit()
 
     return database_path
@@ -801,6 +804,164 @@ def list_development_plans(
     return [_development_plan_row_to_dict(row) for row in rows]
 
 
+def update_user_billing(
+    user_id: str,
+    *,
+    stripe_customer_id: str | None = None,
+    stripe_subscription_id: str | None = None,
+    plan: str | None = None,
+    subscription_status: str | None = None,
+    updated_at: str,
+    clear_subscription_id: bool = False,
+) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.update_user_billing(
+            user_id,
+            stripe_customer_id=stripe_customer_id,
+            stripe_subscription_id=stripe_subscription_id,
+            plan=plan,
+            subscription_status=subscription_status,
+            updated_at=updated_at,
+            clear_subscription_id=clear_subscription_id,
+        )
+
+    assignments = ["updated_at = ?"]
+    values: list[Any] = [updated_at]
+    if stripe_customer_id is not None:
+        assignments.append("stripe_customer_id = ?")
+        values.append(stripe_customer_id)
+    if clear_subscription_id:
+        assignments.append("stripe_subscription_id = NULL")
+    elif stripe_subscription_id is not None:
+        assignments.append("stripe_subscription_id = ?")
+        values.append(stripe_subscription_id)
+    if plan is not None:
+        assignments.append("plan = ?")
+        values.append(plan)
+    if subscription_status is not None:
+        assignments.append("subscription_status = ?")
+        values.append(subscription_status)
+    values.append(user_id)
+
+    with _connect() as connection:
+        connection.execute(
+            f"""
+            UPDATE users
+            SET {", ".join(assignments)}
+            WHERE user_id = ? AND deleted_at IS NULL
+            """,
+            values,
+        )
+        row = connection.execute(
+            f"""
+            SELECT {USER_COLUMNS}
+            FROM users
+            WHERE user_id = ? AND deleted_at IS NULL
+            """,
+            (user_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def get_user_by_stripe_customer_id(customer_id: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_user_by_stripe_customer_id(customer_id)
+
+    with _connect() as connection:
+        row = connection.execute(
+            f"""
+            SELECT {USER_COLUMNS}
+            FROM users
+            WHERE stripe_customer_id = ? AND deleted_at IS NULL
+            """,
+            (customer_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def get_user_by_stripe_subscription_id(subscription_id: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_user_by_stripe_subscription_id(subscription_id)
+
+    with _connect() as connection:
+        row = connection.execute(
+            f"""
+            SELECT {USER_COLUMNS}
+            FROM users
+            WHERE stripe_subscription_id = ? AND deleted_at IS NULL
+            """,
+            (subscription_id,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def get_processar_usage(user_id: str, period: str) -> int:
+    if _use_mongodb():
+        return mongo_repository.get_processar_usage(user_id, period)
+
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT used
+            FROM processar_usage
+            WHERE user_id = ? AND period = ?
+            """,
+            (user_id, period),
+        ).fetchone()
+        return int(row["used"]) if row else 0
+
+
+def consume_processar_usage(user_id: str, *, period: str, limit: int) -> dict[str, Any]:
+    if _use_mongodb():
+        return mongo_repository.consume_processar_usage(
+            user_id,
+            period=period,
+            limit=limit,
+        )
+
+    ensure_user_exists(user_id)
+    updated_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO processar_usage (user_id, period, used, updated_at)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(user_id, period) DO UPDATE SET
+                used = processar_usage.used + 1,
+                updated_at = excluded.updated_at
+            WHERE processar_usage.used < ?
+            """,
+            (user_id, period, updated_at, limit),
+        )
+        row = connection.execute(
+            """
+            SELECT used
+            FROM processar_usage
+            WHERE user_id = ? AND period = ?
+            """,
+            (user_id, period),
+        ).fetchone()
+        used = int(row["used"]) if row else 0
+        allowed = cursor.rowcount > 0
+        return {"allowed": allowed, "used": used}
+
+
+def claim_stripe_webhook_event(event_id: str, event_type: str) -> bool:
+    if _use_mongodb():
+        return mongo_repository.claim_stripe_webhook_event(event_id, event_type)
+
+    processed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO stripe_webhook_events (event_id, event_type, processed_at)
+            VALUES (?, ?, ?)
+            """,
+            (event_id, event_type, processed_at),
+        )
+        return cursor.rowcount > 0
+
+
 def count_generated_files(user_id: str) -> int:
     if _use_mongodb():
         return mongo_repository.count_generated_files(user_id)
@@ -866,6 +1027,15 @@ def _sqlite_collect_user_export_payload(user_id: str) -> dict[str, Any]:
             """,
             (user_id,),
         ).fetchall()
+        usage_rows = connection.execute(
+            """
+            SELECT period, used, updated_at
+            FROM processar_usage
+            WHERE user_id = ?
+            ORDER BY period ASC
+            """,
+            (user_id,),
+        ).fetchall()
 
     return {
         "user": user,
@@ -898,6 +1068,7 @@ def _sqlite_collect_user_export_payload(user_id: str) -> dict[str, Any]:
         "development_plans": list_development_plans(user_id, limit=1000, offset=0),
         "documents": [_row_to_dict(row) or {} for row in document_rows],
         "generated_files": [_row_to_dict(row) or {} for row in file_rows],
+        "processar_usage": [_row_to_dict(row) or {} for row in usage_rows],
     }
 
 
@@ -920,6 +1091,7 @@ def _sqlite_anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
             "user_profile_versions",
             "user_profiles",
             "password_reset_tokens",
+            "processar_usage",
         ):
             connection.execute(
                 f"DELETE FROM {table_name} WHERE user_id = ?",
@@ -932,6 +1104,10 @@ def _sqlite_anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
             SET email = ?,
                 display_name = ?,
                 password_hash = ?,
+                stripe_customer_id = NULL,
+                stripe_subscription_id = NULL,
+                plan = 'free',
+                subscription_status = 'none',
                 updated_at = ?,
                 deleted_at = ?
             WHERE user_id = ?
@@ -1036,6 +1212,72 @@ def _ensure_consent_columns(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_consent_log_user_accepted
             ON consent_log (user_id, accepted_at)
+        """
+    )
+
+
+def _ensure_billing_schema(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in connection.execute("PRAGMA table_info(users)").fetchall()
+    }
+    if "stripe_customer_id" not in columns:
+        connection.execute("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT")
+    if "stripe_subscription_id" not in columns:
+        connection.execute("ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT")
+    if "plan" not in columns:
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'",
+        )
+    if "subscription_status" not in columns:
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN subscription_status TEXT NOT NULL DEFAULT 'none'",
+        )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processar_usage (
+            user_id TEXT NOT NULL,
+            period TEXT NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, period),
+            FOREIGN KEY (user_id) REFERENCES users (user_id),
+            CHECK (used >= 0)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_processar_usage_period
+            ON processar_usage (period)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            processed_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_users_stripe_customer
+            ON users (stripe_customer_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_users_stripe_subscription
+            ON users (stripe_subscription_id)
+        """
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO schema_migrations (version, name)
+        VALUES (3, 'stripe_essencial_quotas')
         """
     )
 

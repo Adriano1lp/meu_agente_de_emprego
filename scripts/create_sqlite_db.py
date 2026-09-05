@@ -15,13 +15,14 @@ def create_database(database_path: Path = DEFAULT_DATABASE_PATH) -> Path:
     database_path = database_path.resolve()
     database_path.parent.mkdir(parents=True, exist_ok=True)
 
-    from database.repository import _ensure_consent_columns
+    from database.repository import _ensure_billing_schema, _ensure_consent_columns
 
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
     with closing(sqlite3.connect(database_path)) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(schema)
         _ensure_consent_columns(connection)
+        _ensure_billing_schema(connection)
         connection.commit()
 
     return database_path

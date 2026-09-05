@@ -45,6 +45,11 @@ Para esse cenario, a maior preocupacao nao e escala de CPU e sim:
 - `MAX_UPLOAD_SIZE_MB`
 - `OPENAI_CHAT_MODEL`
 - `OPENAI_EMBEDDING_MODEL`
+- `STRIPE_SECRET_KEY` (pode faltar em teste; sem ela o checkout retorna 503)
+- `STRIPE_PRICE_ESSENCIAL`
+- `STRIPE_WEBHOOK_SECRET` (pode faltar em teste; sem ela o webhook retorna 503 e nao processa)
+- `STRIPE_CHECKOUT_SUCCESS_URL`
+- `STRIPE_CHECKOUT_CANCEL_URL`
 
 ## Exemplo de configuracao para Render
 
@@ -63,6 +68,11 @@ MONGODB_DATABASE=analista_de_vagas
 MAX_UPLOAD_SIZE_MB=10
 OPENAI_CHAT_MODEL=gpt-4o
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_PRICE_ESSENCIAL=price_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_CHECKOUT_SUCCESS_URL=https://seu-app.onrender.com/?billing=success
+STRIPE_CHECKOUT_CANCEL_URL=https://seu-app.onrender.com/?billing=cancel
 ```
 
 ## Validacoes de seguranca no startup
@@ -181,8 +191,9 @@ Depois do deploy:
 5. `POST /users/me/upload-cv`
 6. `POST /users/me/rebuild-embeddings`
 7. `GET /users/me/status`
-8. `POST /processar`
-9. `GET /users/me/files/{nome_do_arquivo}`
+8. `GET /billing/me`
+9. `POST /processar` (Free: 5/mes UTC; Essencial ativo: 30/mes UTC; 402 se cota esgotada)
+10. `GET /users/me/files/{nome_do_arquivo}`
 
 ## Exemplos de smoke test
 

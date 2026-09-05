@@ -383,6 +383,8 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
         "privacy_accepted": bool(user.get("privacy_accepted")),
         "privacy_accepted_at": user.get("privacy_accepted_at"),
         "privacy_version": user.get("privacy_version"),
+        "plan": user.get("plan") or "free",
+        "subscription_status": user.get("subscription_status") or "none",
         "created_at": user.get("created_at"),
         "updated_at": user.get("updated_at"),
     }

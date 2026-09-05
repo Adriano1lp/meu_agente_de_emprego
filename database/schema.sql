@@ -17,12 +17,22 @@ CREATE TABLE IF NOT EXISTS users (
     privacy_accepted INTEGER NOT NULL DEFAULT 0,
     privacy_accepted_at TEXT,
     privacy_version TEXT,
+    stripe_customer_id TEXT,
+    stripe_subscription_id TEXT,
+    plan TEXT NOT NULL DEFAULT 'free',
+    subscription_status TEXT NOT NULL DEFAULT 'none',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    deleted_at TEXT
+    deleted_at TEXT,
+    CHECK (plan IN ('free', 'essencial')),
+    CHECK (subscription_status IN ('active', 'past_due', 'canceled', 'none'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
+CREATE INDEX IF NOT EXISTS idx_users_stripe_customer
+    ON users (stripe_customer_id);
+CREATE INDEX IF NOT EXISTS idx_users_stripe_subscription
+    ON users (stripe_subscription_id);
 
 CREATE TABLE IF NOT EXISTS consent_log (
     consent_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,8 +224,30 @@ CREATE TABLE IF NOT EXISTS generated_files (
 CREATE INDEX IF NOT EXISTS idx_generated_files_user_id
     ON generated_files (user_id);
 
+CREATE TABLE IF NOT EXISTS processar_usage (
+    user_id TEXT NOT NULL,
+    period TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, period),
+    FOREIGN KEY (user_id) REFERENCES users (user_id),
+    CHECK (used >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_processar_usage_period
+    ON processar_usage (period);
+
+CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    processed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (1, 'initial_sqlite_schema');
 
 INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (2, 'versioned_consent_log');
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (3, 'stripe_essencial_quotas');
