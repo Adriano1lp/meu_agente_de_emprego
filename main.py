@@ -870,7 +870,8 @@ def _persist_generated_pdf(
     caminho_pdf = get_user_output_dir(user_id) / file_name
     writer(caminho_pdf)
     object_key = user_object_key(user_id, "outputs", file_name)
-    put_file(object_key, caminho_pdf, "application/pdf")
+    if caminho_pdf.exists():
+        put_file(object_key, caminho_pdf, "application/pdf")
     return caminho_pdf, object_key
 
 

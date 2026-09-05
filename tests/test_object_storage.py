@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sys
+from types import ModuleType
+from unittest.mock import MagicMock
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,6 +27,61 @@ from services.object_storage import (
     user_object_key,
     user_prefix,
 )
+
+
+def _install_heavy_service_stubs() -> None:
+    stubs = {
+        "services.main_chat": {
+            "generate_cover_letter": MagicMock(),
+            "pipeline_with_details": MagicMock(
+                return_value={
+                    "resposta_usuario": "Analise ok",
+                    "match_score": 80,
+                    "should_generate_curriculum": False,
+                    "vaga": {"cargo": "Dev"},
+                    "matching": {"pontos_fortes": ["Python"]},
+                    "otimizacao": {},
+                }
+            ),
+        },
+        "services.main_carta": {
+            "gerar_pdf_carta_apresentacao": MagicMock(),
+        },
+        "services.main_curriculo": {
+            "gerar_pdf_profissional": MagicMock(),
+        },
+        "services.main_rag": {
+            "rebuild_vectorstore_for_user": MagicMock(),
+        },
+        "services.development_plan": {
+            "DEFAULT_ANALYSIS_LIMIT": 10,
+            "MAX_ANALYSIS_LIMIT": 20,
+            "generate_development_plan": MagicMock(),
+            "read_active_development_plan": MagicMock(),
+            "read_development_plan_history": MagicMock(),
+            "update_development_plan_item_status": MagicMock(),
+        },
+        "services.user_data": {
+            "get_user_profile": MagicMock(),
+            "save_manual_profile": MagicMock(),
+            "save_user_cv": MagicMock(),
+            "save_user_profile": MagicMock(),
+        },
+    }
+    for name, attributes in stubs.items():
+        if name in sys.modules:
+            continue
+        module = ModuleType(name)
+        for key, value in attributes.items():
+            setattr(module, key, value)
+        sys.modules[name] = module
+
+
+def _client() -> TestClient:
+    _install_heavy_service_stubs()
+    from main import app
+
+    return TestClient(app)
 
 
 class _FakeBody:
@@ -125,9 +184,7 @@ def test_s3_stub_put_signed_url_and_purge(isolated_db, monkeypatch: pytest.Monke
 
 
 def test_download_generated_pdf_owner_only(isolated_db) -> None:
-    from main import app
-
-    client = TestClient(app)
+    client = _client()
     owner = _register(client, "owner.storage@example.com")
     other = _register(client, "other.storage@example.com")
     file_name = "curriculo-teste.pdf"
@@ -157,9 +214,7 @@ def test_download_uses_s3_stub_when_disk_is_empty(
     monkeypatch.setattr("config.S3_BUCKET", "test-bucket")
     set_s3_client(fake)
     try:
-        from main import app
-
-        client = TestClient(app)
+        client = _client()
         owner = _register(client, "remote.pdf@example.com")
         file_name = "remoto.pdf"
         key = user_object_key(str(owner["user_id"]), "outputs", file_name)
@@ -179,9 +234,7 @@ def test_delete_account_purges_object_prefix(isolated_db, monkeypatch: pytest.Mo
     monkeypatch.setattr("config.S3_BUCKET", "test-bucket")
     set_s3_client(fake)
     try:
-        from main import app
-
-        client = TestClient(app)
+        client = _client()
         session = _register(client, "purge.r2@example.com")
         user_id = str(session["user_id"])
         cv_key = user_object_key(user_id, "documents", "cv_original.pdf")

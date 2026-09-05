@@ -22,7 +22,16 @@ def _install_heavy_service_stubs() -> None:
     stubs = {
         "services.main_chat": {
             "generate_cover_letter": MagicMock(),
-            "pipeline_with_details": MagicMock(),
+            "pipeline_with_details": MagicMock(
+                return_value={
+                    "resposta_usuario": "Analise ok",
+                    "match_score": 80,
+                    "should_generate_curriculum": False,
+                    "vaga": {"cargo": "Dev"},
+                    "matching": {"pontos_fortes": ["Python"]},
+                    "otimizacao": {},
+                }
+            ),
         },
         "services.main_carta": {
             "gerar_pdf_carta_apresentacao": MagicMock(),
