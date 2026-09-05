@@ -48,6 +48,9 @@ PASSWORD_RESET_EXPOSE_TOKEN = (
     os.getenv("PASSWORD_RESET_EXPOSE_TOKEN", "").strip().lower()
     in {"1", "true", "yes", "on"}
 )
+CURRENT_TERMS_VERSION = os.getenv("CURRENT_TERMS_VERSION", "1.0").strip() or "1.0"
+CURRENT_PRIVACY_VERSION = os.getenv("CURRENT_PRIVACY_VERSION", "1.0").strip() or "1.0"
+LEGAL_DOCS_DIR = BASE_DIR / "legal"
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10"))
 CORS_ALLOW_ORIGINS = [
     origin.strip()

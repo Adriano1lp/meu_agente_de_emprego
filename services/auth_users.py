@@ -11,21 +11,25 @@ from typing import Any
 from fastapi import HTTPException
 
 from config import (
+    CURRENT_PRIVACY_VERSION,
+    CURRENT_TERMS_VERSION,
     ENVIRONMENT,
     PASSWORD_RESET_EXPIRATION_MINUTES,
     PASSWORD_RESET_EXPOSE_TOKEN,
     sanitize_user_id,
 )
 from database.repository import (
-    accept_user_terms,
+    append_consent_log,
     create_password_reset_token,
     create_user,
     get_password_reset_token_by_hash,
     get_user_by_email,
     get_user_by_id as find_user_by_id,
     mark_password_reset_token_used,
+    update_user_consent,
     update_user_password_hash,
 )
+from services.legal import current_version_for
 
 PBKDF2_ITERATIONS = 200_000
 PASSWORD_RESET_GENERIC_MESSAGE = (
@@ -38,7 +42,10 @@ def register_user(
     display_name: str,
     email: str,
     password: str,
-    terms_accepted: bool,
+    terms_accepted: bool | None,
+    terms_version: str | None,
+    privacy_accepted: bool | None,
+    privacy_version: str | None,
 ) -> dict[str, Any]:
     normalized_email = _normalize_email(email)
     display_name = display_name.strip()
@@ -46,8 +53,12 @@ def register_user(
         raise HTTPException(status_code=400, detail="Nome obrigatorio")
 
     _validate_password(password)
-    if not terms_accepted:
-        raise HTTPException(status_code=400, detail="Aceite do termo de uso obrigatorio")
+    _require_signup_consents(
+        terms_accepted=terms_accepted,
+        terms_version=terms_version,
+        privacy_accepted=privacy_accepted,
+        privacy_version=privacy_version,
+    )
 
     if get_user_by_email(normalized_email):
         raise HTTPException(status_code=409, detail="Email ja cadastrado")
@@ -61,11 +72,29 @@ def register_user(
         "password_hash": _hash_password(password),
         "terms_accepted": True,
         "terms_accepted_at": now,
+        "terms_version": CURRENT_TERMS_VERSION,
+        "privacy_accepted": True,
+        "privacy_accepted_at": now,
+        "privacy_version": CURRENT_PRIVACY_VERSION,
         "created_at": now,
         "updated_at": now,
     }
+    consents = [
+        {
+            "user_id": user_id,
+            "doc": "terms",
+            "version": CURRENT_TERMS_VERSION,
+            "accepted_at": now,
+        },
+        {
+            "user_id": user_id,
+            "doc": "privacy",
+            "version": CURRENT_PRIVACY_VERSION,
+            "accepted_at": now,
+        },
+    ]
     try:
-        create_user(user)
+        create_user(user, consents=consents)
     except Exception as exc:
         if "duplicate" in str(exc).lower() or "unique" in str(exc).lower():
             raise HTTPException(status_code=409, detail="Email ja cadastrado") from exc
@@ -158,15 +187,119 @@ def user_can_access_terms_protected_routes(user_id: str) -> bool | None:
         return None
     if user.get("password_hash") == "legacy_external_auth":
         return True
-    return bool(user.get("terms_accepted"))
+    return get_outdated_consent_code(user_id) is None
+
+
+def get_outdated_consent_code(user_id: str) -> str | None:
+    safe_user_id = sanitize_user_id(user_id)
+    user = find_user_by_id(safe_user_id)
+    if not user:
+        return None
+    if user.get("password_hash") == "legacy_external_auth":
+        return None
+    if str(user.get("terms_version") or "") != CURRENT_TERMS_VERSION:
+        return "TERMS_OUTDATED"
+    if str(user.get("privacy_version") or "") != CURRENT_PRIVACY_VERSION:
+        return "PRIVACY_OUTDATED"
+    return None
 
 
 def accept_terms_for_user(user_id: str) -> dict[str, Any]:
+    return accept_consent_for_user(
+        user_id,
+        doc="terms",
+        version=CURRENT_TERMS_VERSION,
+    )
+
+
+def accept_consent_for_user(user_id: str, *, doc: str, version: str) -> dict[str, Any]:
     safe_user_id = sanitize_user_id(user_id)
-    user = accept_user_terms(safe_user_id, _utc_now_iso())
+    user = find_user_by_id(safe_user_id)
     if not user:
         raise HTTPException(status_code=404, detail="Usuario nao encontrado")
-    return _public_user(user)
+
+    normalized_doc = (doc or "").strip().lower()
+    if normalized_doc not in {"terms", "privacy"}:
+        raise HTTPException(status_code=400, detail="doc deve ser terms ou privacy")
+
+    normalized_version = (version or "").strip()
+    current_version = current_version_for(normalized_doc)
+    if not normalized_version:
+        raise HTTPException(status_code=400, detail="version obrigatoria")
+    if normalized_version != current_version:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Versao invalida. Vigente: {current_version}",
+        )
+
+    now = _utc_now_iso()
+    append_consent_log(
+        {
+            "user_id": safe_user_id,
+            "doc": normalized_doc,
+            "version": normalized_version,
+            "accepted_at": now,
+        }
+    )
+    updated_user = update_user_consent(
+        safe_user_id,
+        doc=normalized_doc,
+        version=normalized_version,
+        accepted_at=now,
+    )
+    if not updated_user:
+        raise HTTPException(status_code=404, detail="Usuario nao encontrado")
+    return _public_user(updated_user)
+
+
+def _require_signup_consents(
+    *,
+    terms_accepted: bool | None,
+    terms_version: str | None,
+    privacy_accepted: bool | None,
+    privacy_version: str | None,
+) -> None:
+    missing = any(
+        value is None
+        for value in (terms_accepted, terms_version, privacy_accepted, privacy_version)
+    )
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Aceite de termos e privacidade obrigatorio "
+                "(terms_accepted, terms_version, privacy_accepted, privacy_version)"
+            ),
+        )
+
+    if terms_accepted is not True:
+        raise HTTPException(status_code=400, detail="Aceite do termo de uso obrigatorio")
+    if privacy_accepted is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="Aceite da politica de privacidade obrigatorio",
+        )
+
+    normalized_terms_version = str(terms_version).strip()
+    normalized_privacy_version = str(privacy_version).strip()
+    if not normalized_terms_version or not normalized_privacy_version:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Aceite de termos e privacidade obrigatorio "
+                "(terms_accepted, terms_version, privacy_accepted, privacy_version)"
+            ),
+        )
+    if normalized_terms_version != CURRENT_TERMS_VERSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Versao de termos invalida. Vigente: {CURRENT_TERMS_VERSION}",
+        )
+    if normalized_privacy_version != CURRENT_PRIVACY_VERSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Versao de privacidade invalida. Vigente: {CURRENT_PRIVACY_VERSION}",
+        )
 
 
 def _normalize_email(email: str) -> str:
@@ -242,6 +375,10 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
         "display_name": user["display_name"],
         "terms_accepted": bool(user.get("terms_accepted")),
         "terms_accepted_at": user.get("terms_accepted_at"),
+        "terms_version": user.get("terms_version"),
+        "privacy_accepted": bool(user.get("privacy_accepted")),
+        "privacy_accepted_at": user.get("privacy_accepted_at"),
+        "privacy_version": user.get("privacy_version"),
         "created_at": user.get("created_at"),
         "updated_at": user.get("updated_at"),
     }

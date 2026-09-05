@@ -21,8 +21,10 @@ def initialize_database() -> Any:
     return database
 
 
-def create_user(user: dict[str, Any]) -> None:
+def create_user(user: dict[str, Any], *, consents: list[dict[str, Any]] | None = None) -> None:
     _get_collection("users").insert_one({**user, "deleted_at": None})
+    for consent in consents or []:
+        append_consent_log(consent)
 
 
 def ensure_user_exists(user_id: str) -> None:
@@ -41,6 +43,10 @@ def ensure_user_exists(user_id: str) -> None:
                 "password_hash": "legacy_external_auth",
                 "terms_accepted": False,
                 "terms_accepted_at": None,
+                "terms_version": None,
+                "privacy_accepted": False,
+                "privacy_accepted_at": None,
+                "privacy_version": None,
                 "created_at": now,
                 "updated_at": now,
                 "deleted_at": None,
@@ -66,23 +72,62 @@ def get_user_by_id(user_id: str) -> dict[str, Any] | None:
     return dict(user) if user else None
 
 
-def accept_user_terms(user_id: str, accepted_at: str) -> dict[str, Any] | None:
+def accept_user_terms(user_id: str, accepted_at: str, *, version: str | None = None) -> dict[str, Any] | None:
+    return update_user_consent(
+        user_id,
+        doc="terms",
+        version=version or "",
+        accepted_at=accepted_at,
+    )
+
+
+def update_user_consent(
+    user_id: str,
+    *,
+    doc: str,
+    version: str,
+    accepted_at: str,
+) -> dict[str, Any] | None:
+    if doc == "terms":
+        fields = {
+            "terms_accepted": True,
+            "terms_accepted_at": accepted_at,
+            "terms_version": version,
+            "updated_at": accepted_at,
+        }
+    elif doc == "privacy":
+        fields = {
+            "privacy_accepted": True,
+            "privacy_accepted_at": accepted_at,
+            "privacy_version": version,
+            "updated_at": accepted_at,
+        }
+    else:
+        raise ValueError("doc deve ser terms ou privacy")
+
     users = _get_collection("users")
     users.update_one(
         {"user_id": user_id, "deleted_at": None},
-        {
-            "$set": {
-                "terms_accepted": True,
-                "terms_accepted_at": accepted_at,
-                "updated_at": accepted_at,
-            },
-        },
+        {"$set": fields},
     )
     user = users.find_one(
         {"user_id": user_id, "deleted_at": None},
         {"_id": 0},
     )
     return dict(user) if user else None
+
+
+def append_consent_log(consent: dict[str, Any]) -> None:
+    _get_collection("consent_log").insert_one(dict(consent))
+
+
+def list_consent_log(user_id: str) -> list[dict[str, Any]]:
+    documents = _get_collection("consent_log").find(
+        {"user_id": user_id},
+        {"_id": 0, "user_id": 1, "doc": 1, "version": 1, "accepted_at": 1},
+        sort=[("accepted_at", 1), ("_id", 1)],
+    )
+    return [dict(document) for document in documents]
 
 
 def update_user_password_hash(
@@ -417,6 +462,7 @@ def _ensure_indexes(database: Any) -> None:
 
     database.users.create_index("email", unique=True)
     database.users.create_index("user_id", unique=True)
+    database.consent_log.create_index([("user_id", 1), ("accepted_at", 1)])
     database.password_reset_tokens.create_index("token_hash", unique=True)
     database.password_reset_tokens.create_index([("user_id", 1), ("created_at", -1)])
     database.password_reset_tokens.create_index("expires_at")
