@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from auth import create_access_token, decode_access_token, get_current_user_id
@@ -52,6 +52,13 @@ from services.billing import (
     handle_stripe_webhook,
 )
 from services.legal import current_legal_documents
+from services.object_storage import (
+    exists as object_exists,
+    is_remote_storage,
+    put_file,
+    signed_url,
+    user_object_key,
+)
 from services.development_plan import (
     DEFAULT_ANALYSIS_LIMIT,
     MAX_ANALYSIS_LIMIT,
@@ -499,14 +506,23 @@ def rebuild_embeddings(
     return rebuild_vectorstore_for_user(user_id)
 
 
-@app.get("/users/me/files/{file_name}")
+@app.get("/users/me/files/{file_name}", response_model=None)
 def download_user_file(
     file_name: str,
     user_id: str = Depends(_require_terms_accepted),
-) -> FileResponse:
+) -> FileResponse | RedirectResponse:
     safe_file_name = Path(file_name).name
     if safe_file_name != file_name:
         raise HTTPException(status_code=400, detail="Nome de arquivo invalido")
+
+    object_key = user_object_key(user_id, "outputs", safe_file_name)
+    if is_remote_storage():
+        if not object_exists(object_key):
+            raise HTTPException(status_code=404, detail="Arquivo nao encontrado")
+        remote_url = signed_url(object_key)
+        if not remote_url:
+            raise HTTPException(status_code=404, detail="Arquivo nao encontrado")
+        return RedirectResponse(url=remote_url, status_code=302)
 
     file_path = get_user_output_dir(user_id) / safe_file_name
     if not file_path.exists() or not file_path.is_file():
@@ -638,8 +654,11 @@ def processar(
 
         curriculo_otimizado = str(pipeline_result["curriculo"])
         nome_arquivo = f"{uuid.uuid4()}.pdf"
-        caminho_pdf = get_user_output_dir(user_id) / nome_arquivo
-        gerar_pdf_profissional(curriculo_otimizado, str(caminho_pdf))
+        caminho_pdf, object_key = _persist_generated_pdf(
+            user_id,
+            nome_arquivo,
+            lambda path: gerar_pdf_profissional(curriculo_otimizado, str(path)),
+        )
 
         pdf_url = _build_public_file_url(request, nome_arquivo)
         processing_run_id = create_processing_run(
@@ -661,6 +680,7 @@ def processar(
                 "processing_run_id": processing_run_id,
                 "file_name": nome_arquivo,
                 "file_path": str(caminho_pdf),
+                "object_key": object_key,
                 "public_url": pdf_url,
                 "media_type": "application/pdf",
                 "bytes_size": caminho_pdf.stat().st_size if caminho_pdf.exists() else None,
@@ -721,8 +741,11 @@ def generate_user_cover_letter(
         carta = generate_cover_letter(empresa, user_id)
 
         nome_arquivo = f"carta-apresentacao-{uuid.uuid4()}.pdf"
-        caminho_pdf = get_user_output_dir(user_id) / nome_arquivo
-        gerar_pdf_carta_apresentacao(carta, str(caminho_pdf))
+        caminho_pdf, object_key = _persist_generated_pdf(
+            user_id,
+            nome_arquivo,
+            lambda path: gerar_pdf_carta_apresentacao(carta, str(path)),
+        )
 
         pdf_url = _build_public_file_url(request, nome_arquivo)
         processing_run_id = create_processing_run(
@@ -744,6 +767,7 @@ def generate_user_cover_letter(
                 "processing_run_id": processing_run_id,
                 "file_name": nome_arquivo,
                 "file_path": str(caminho_pdf),
+                "object_key": object_key,
                 "public_url": pdf_url,
                 "media_type": "application/pdf",
                 "bytes_size": caminho_pdf.stat().st_size if caminho_pdf.exists() else None,
@@ -775,6 +799,20 @@ def generate_user_cover_letter(
             status_code=500,
             detail="Erro interno ao gerar carta de apresentacao",
         ) from exc
+
+
+def _persist_generated_pdf(
+    user_id: str,
+    file_name: str,
+    writer,
+) -> tuple[Path, str]:
+    caminho_pdf = get_user_output_dir(user_id) / file_name
+    writer(caminho_pdf)
+    object_key = user_object_key(user_id, "outputs", file_name)
+    put_file(object_key, caminho_pdf, "application/pdf")
+    if is_remote_storage() and caminho_pdf.exists():
+        caminho_pdf.unlink(missing_ok=True)
+    return caminho_pdf, object_key
 
 
 def _build_public_file_url(request: Request, file_name: str) -> str:

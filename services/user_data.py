@@ -20,6 +20,7 @@ from database.repository import (
     get_user_profile as get_persisted_user_profile,
     upsert_user_profile,
 )
+from services.object_storage import put_bytes, user_object_key
 
 ALLOWED_CV_EXTENSIONS = {".txt", ".pdf"}
 
@@ -55,9 +56,20 @@ def save_user_cv(upload_file: UploadFile, user_id: str) -> dict[str, Any]:
     documents_dir = get_user_documents_dir(user_id)
     original_file_path = documents_dir / f"cv_original{file_extension}"
     original_file_path.write_bytes(file_bytes)
+    original_object_key = user_object_key(
+        user_id,
+        "documents",
+        original_file_path.name,
+    )
+    put_bytes(
+        original_object_key,
+        file_bytes,
+        upload_file.content_type or "application/octet-stream",
+    )
 
     cv_file = get_user_cv_file(user_id)
     cv_file.write_text(cv_text, encoding="utf-8")
+    put_bytes(user_object_key(user_id, "documents", cv_file.name), cv_text.encode("utf-8"), "text/plain")
 
     updated_at = _utc_now_iso()
     document_id = create_user_document(
@@ -67,6 +79,7 @@ def save_user_cv(upload_file: UploadFile, user_id: str) -> dict[str, Any]:
             "original_filename": upload_file.filename or original_file_path.name,
             "original_content_type": upload_file.content_type or "application/octet-stream",
             "original_file_path": str(original_file_path),
+            "object_key": original_object_key,
             "extracted_text_path": str(cv_file),
             "extracted_text": cv_text,
             "bytes_received": file_size,

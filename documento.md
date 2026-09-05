@@ -252,7 +252,7 @@ Exclui a conta do titular autenticado:
 
 - define `deleted_at` e anonimiza email/nome/senha
 - apaga registros relacionados (perfil, documentos, embeddings, processamentos, PDI, arquivos gerados, tokens de reset)
-- remove `storage/users/{user_id}/`
+- remove `storage/users/{user_id}/` e o prefixo equivalente no object storage
 - o log de consentimento e preservado como evidencia legal
 
 Apos a exclusao, `GET /auth/me` retorna `404` e o login com o email original retorna `401`.
@@ -767,6 +767,8 @@ Quando todos os pesos forem concluidos, o PDI passa para `completed`. Se algum i
 ### `GET /users/me/files/{nome_do_arquivo}`
 
 Serve os PDFs gerados pelo proprio usuario autenticado.
+Com `OBJECT_STORAGE_BACKEND=s3` o endpoint redireciona (`302`) para uma URL assinada do S3/R2.
+Com o fallback `local`, o arquivo continua em `storage/users/{user_id}/outputs/`.
 
 ### Exemplo
 
@@ -839,6 +841,8 @@ Em producao, os dados de negocio ficam em colecoes MongoDB separadas por `user_i
 - `job_analysis_insights`
 - `development_plans`
 - `generated_files`
+
+PDFs e uploads originais tambem vao para object storage (`OBJECT_STORAGE_BACKEND=s3`) com URL assinada no download.
 
 Arquivos gerados para download continuam em:
 

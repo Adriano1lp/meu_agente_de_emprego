@@ -27,6 +27,7 @@ def initialize_database(database_path: Path | None = None) -> Path:
         connection.executescript(schema)
         _ensure_legal_schema(connection)
         _ensure_billing_schema(connection)
+        _ensure_storage_schema(connection)
         connection.commit()
 
     return database_path
@@ -691,15 +692,15 @@ def create_generated_file(file_data: dict[str, Any]) -> int | str:
         cursor = connection.execute(
             """
             INSERT INTO generated_files (
-                user_id, processing_run_id, file_name, file_path, public_url,
-                media_type, bytes_size
+                user_id, processing_run_id, file_name, file_path, object_key,
+                public_url, media_type, bytes_size
             )
             VALUES (
-                :user_id, :processing_run_id, :file_name, :file_path, :public_url,
-                :media_type, :bytes_size
+                :user_id, :processing_run_id, :file_name, :file_path, :object_key,
+                :public_url, :media_type, :bytes_size
             )
             """,
-            file_data,
+            {**file_data, "object_key": file_data.get("object_key")},
         )
         return int(cursor.lastrowid)
 
@@ -962,8 +963,8 @@ def _sqlite_collect_user_export_payload(user_id: str) -> dict[str, Any]:
         ).fetchall()
         file_rows = connection.execute(
             """
-            SELECT generated_file_id, file_name, file_path, public_url, media_type,
-                bytes_size, created_at
+            SELECT generated_file_id, file_name, file_path, object_key, public_url,
+                media_type, bytes_size, created_at
             FROM generated_files
             WHERE user_id = ?
             ORDER BY created_at ASC
@@ -1087,6 +1088,15 @@ def _json_load_or_none(value: str | None) -> Any:
     if not value:
         return None
     return json.loads(value)
+
+
+def _ensure_storage_schema(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in connection.execute("PRAGMA table_info(generated_files)").fetchall()
+    }
+    if columns and "object_key" not in columns:
+        connection.execute("ALTER TABLE generated_files ADD COLUMN object_key TEXT")
 
 
 def _ensure_billing_schema(connection: sqlite3.Connection) -> None:

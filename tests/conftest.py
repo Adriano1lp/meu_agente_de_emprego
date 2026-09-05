@@ -22,6 +22,7 @@ os.environ["ESSENCIAL_LLM_QUOTA_MONTHLY"] = "10"
 os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_test"
 os.environ["STRIPE_SECRET_KEY"] = ""
 os.environ["STRIPE_PRICE_ESSENCIAL"] = ""
+os.environ["OBJECT_STORAGE_BACKEND"] = "local"
 
 API_DIR = Path(__file__).resolve().parents[1]
 if str(API_DIR) not in sys.path:
