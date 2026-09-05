@@ -301,6 +301,7 @@ Efeito:
 - remove `storage/users/{user_id}/` (curriculo, chroma, PDFs)
 - `consent_log` permanece append-only (doc, version, accepted_at, user_id)
 - login com o email original falha (`401`); o email fica livre para um novo cadastro
+  (o `user_id` da conta apagada permanece no stub; o recadastro recebe um id novo)
 - rotas autenticadas do usuario passam a responder `401`
 
 ```bash
