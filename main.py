@@ -29,6 +29,7 @@ from database.repository import (
     create_job_analysis_insight,
     create_processing_run,
     get_latest_user_document_id,
+    is_deleted_user,
     list_job_analysis_insights,
 )
 from services.main_chat import generate_cover_letter, pipeline_with_details
@@ -45,6 +46,7 @@ from services.auth_users import (
     register_user,
     request_password_reset,
 )
+from services.account import delete_current_user, export_current_user
 from services.legal import get_legal_markdown
 from services.development_plan import (
     DEFAULT_ANALYSIS_LIMIT,
@@ -200,6 +202,14 @@ class ConsentRequest(BaseModel):
     version: str
 
 
+async def _read_optional_json_body(request: Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 def _read_authorization_header(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> str | None:
@@ -240,8 +250,18 @@ def _raise_if_consent_outdated(user_id: str) -> None:
 
 
 def _require_terms_accepted(user_id: str = Depends(get_current_user_id)) -> str:
+    if is_deleted_user(user_id):
+        raise HTTPException(status_code=401, detail="Usuario nao encontrado")
     _raise_if_consent_outdated(user_id)
     return user_id
+
+
+def _require_delete_confirmation(payload: dict[str, Any]) -> None:
+    if payload.get("confirm") != "DELETE":
+        raise HTTPException(
+            status_code=400,
+            detail='Confirmacao obrigatoria. Envie {"confirm": "DELETE"}',
+        )
 
 
 @app.get("/health")
@@ -303,6 +323,9 @@ def auth_me(authorization: str = Depends(_require_authorization_header)) -> dict
     user_id = payload.get("user_id") or payload.get("sub")
     if not isinstance(user_id, str) or not user_id.strip():
         raise HTTPException(status_code=401, detail="Token sem usuario valido")
+
+    if is_deleted_user(user_id):
+        raise HTTPException(status_code=401, detail="Usuario nao encontrado")
 
     user = get_user_by_id(user_id)
     if not user:
@@ -367,6 +390,24 @@ def accept_current_user_terms(
     if not payload.accepted:
         raise HTTPException(status_code=400, detail="Aceite do termo de uso obrigatorio")
     return accept_terms_for_user(user_id)
+
+
+@app.get("/users/me/export")
+def export_current_user_data(
+    user_id: str = Depends(_require_terms_accepted),
+) -> dict[str, Any]:
+    return export_current_user(user_id)
+
+
+@app.delete("/users/me")
+async def delete_current_user_account(
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    if is_deleted_user(user_id):
+        raise HTTPException(status_code=401, detail="Usuario nao encontrado")
+    _require_delete_confirmation(await _read_optional_json_body(request))
+    return delete_current_user(user_id)
 
 
 @app.post("/users/me/upload-cv")

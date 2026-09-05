@@ -72,6 +72,14 @@ def get_user_by_id(user_id: str) -> dict[str, Any] | None:
     return dict(user) if user else None
 
 
+def is_deleted_user(user_id: str) -> bool:
+    user = _get_collection("users").find_one(
+        {"user_id": user_id, "deleted_at": {"$ne": None}},
+        {"_id": 1},
+    )
+    return user is not None
+
+
 def accept_user_terms(user_id: str, accepted_at: str, *, version: str | None = None) -> dict[str, Any] | None:
     return update_user_consent(
         user_id,
@@ -428,6 +436,108 @@ def list_development_plans(
 
 def count_generated_files(user_id: str) -> int:
     return int(_get_collection("generated_files").count_documents({"user_id": user_id}))
+
+
+def collect_user_export_payload(user_id: str) -> dict[str, Any]:
+    user = get_user_by_id(user_id)
+    if not user:
+        return {}
+
+    user.pop("password_hash", None)
+    profile = get_user_profile(user_id)
+    documents = [
+        {
+            "original_filename": document.get("original_filename"),
+            "original_content_type": document.get("original_content_type"),
+            "document_type": document.get("document_type"),
+            "created_at": document.get("created_at"),
+        }
+        for document in _get_collection("user_documents").find(
+            {"user_id": user_id},
+            {
+                "_id": 0,
+                "original_filename": 1,
+                "original_content_type": 1,
+                "document_type": 1,
+                "created_at": 1,
+            },
+            sort=[("created_at", 1)],
+        )
+    ]
+    processing_runs = [
+        _public_mongo_document(document)
+        for document in _get_collection("processing_runs").find(
+            {"user_id": user_id},
+            sort=[("created_at", 1)],
+        )
+    ]
+    generated_files = [
+        {
+            "file_name": document.get("file_name"),
+            "media_type": document.get("media_type"),
+            "created_at": document.get("created_at"),
+        }
+        for document in _get_collection("generated_files").find(
+            {"user_id": user_id},
+            {"_id": 0, "file_name": 1, "media_type": 1, "created_at": 1},
+            sort=[("created_at", 1)],
+        )
+    ]
+    return {
+        "user": user,
+        "profile": profile,
+        "processing_runs": processing_runs,
+        "job_analysis_insights": list_job_analysis_insights(
+            user_id,
+            limit=1000,
+            offset=0,
+        ),
+        "development_plans": list_development_plans(user_id, limit=1000, offset=0),
+        "documents": documents,
+        "generated_files": generated_files,
+    }
+
+
+def anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
+    users = _get_collection("users")
+    if not users.find_one({"user_id": user_id, "deleted_at": None}, {"_id": 1}):
+        return False
+
+    for collection_name in (
+        "generated_files",
+        "job_analysis_insights",
+        "development_plans",
+        "processing_runs",
+        "embedding_runs",
+        "embedding_chunks",
+        "user_documents",
+        "user_profile_versions",
+        "user_profiles",
+        "password_reset_tokens",
+    ):
+        _get_collection(collection_name).delete_many({"user_id": user_id})
+
+    users.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "email": f"deleted+{user_id}@invalid.local",
+                "display_name": "Conta excluida",
+                "password_hash": "deleted_account",
+                "updated_at": deleted_at,
+                "deleted_at": deleted_at,
+            },
+        },
+    )
+    return True
+
+
+def _public_mongo_document(document: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(document)
+    if "_id" in payload:
+        payload["id"] = str(payload.pop("_id"))
+    payload.pop("password_hash", None)
+    return payload
 
 
 def _get_collection(name: str) -> Any:
