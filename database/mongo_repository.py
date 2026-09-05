@@ -41,6 +41,10 @@ def ensure_user_exists(user_id: str) -> None:
                 "password_hash": "legacy_external_auth",
                 "terms_accepted": False,
                 "terms_accepted_at": None,
+                "terms_version": None,
+                "privacy_accepted": False,
+                "privacy_accepted_at": None,
+                "privacy_version": None,
                 "created_at": now,
                 "updated_at": now,
                 "deleted_at": None,
@@ -67,22 +71,81 @@ def get_user_by_id(user_id: str) -> dict[str, Any] | None:
 
 
 def accept_user_terms(user_id: str, accepted_at: str) -> dict[str, Any] | None:
+    return accept_user_legal_documents(
+        user_id,
+        accepted_at=accepted_at,
+        terms_version=None,
+        privacy_version=None,
+    )
+
+
+def accept_user_legal_documents(
+    user_id: str,
+    *,
+    accepted_at: str,
+    terms_version: str | None,
+    privacy_version: str | None,
+) -> dict[str, Any] | None:
     users = _get_collection("users")
+    updates: dict[str, Any] = {
+        "terms_accepted": True,
+        "terms_accepted_at": accepted_at,
+        "privacy_accepted": True,
+        "privacy_accepted_at": accepted_at,
+        "updated_at": accepted_at,
+    }
+    if terms_version:
+        updates["terms_version"] = terms_version
+    if privacy_version:
+        updates["privacy_version"] = privacy_version
     users.update_one(
         {"user_id": user_id, "deleted_at": None},
-        {
-            "$set": {
-                "terms_accepted": True,
-                "terms_accepted_at": accepted_at,
-                "updated_at": accepted_at,
-            },
-        },
+        {"$set": updates},
     )
     user = users.find_one(
         {"user_id": user_id, "deleted_at": None},
         {"_id": 0},
     )
     return dict(user) if user else None
+
+
+def append_consent_log(entry: dict[str, Any]) -> None:
+    _get_collection("consent_log").insert_one(
+        {
+            "user_id": entry["user_id"],
+            "document_type": entry["document_type"],
+            "document_version": entry["document_version"],
+            "accepted": bool(entry.get("accepted", True)),
+            "accepted_at": entry["accepted_at"],
+            "source": entry.get("source") or "unknown",
+            "ip_address": entry.get("ip_address"),
+            "user_agent": entry.get("user_agent"),
+        }
+    )
+
+
+def list_consent_log(user_id: str) -> list[dict[str, Any]]:
+    documents = _get_collection("consent_log").find(
+        {"user_id": user_id},
+        {"_id": 1, "user_id": 1, "document_type": 1, "document_version": 1,
+         "accepted": 1, "accepted_at": 1, "source": 1, "ip_address": 1,
+         "user_agent": 1},
+        sort=[("accepted_at", 1), ("_id", 1)],
+    )
+    return [
+        {
+            "consent_id": str(document.get("_id")),
+            "user_id": document.get("user_id"),
+            "document_type": document.get("document_type"),
+            "document_version": document.get("document_version"),
+            "accepted": bool(document.get("accepted", True)),
+            "accepted_at": document.get("accepted_at"),
+            "source": document.get("source"),
+            "ip_address": document.get("ip_address"),
+            "user_agent": document.get("user_agent"),
+        }
+        for document in documents
+    ]
 
 
 def update_user_password_hash(
@@ -417,6 +480,8 @@ def _ensure_indexes(database: Any) -> None:
 
     database.users.create_index("email", unique=True)
     database.users.create_index("user_id", unique=True)
+    database.consent_log.create_index([("user_id", 1), ("accepted_at", 1)])
+    database.consent_log.create_index([("document_type", 1), ("document_version", 1)])
     database.password_reset_tokens.create_index("token_hash", unique=True)
     database.password_reset_tokens.create_index([("user_id", 1), ("created_at", -1)])
     database.password_reset_tokens.create_index("expires_at")

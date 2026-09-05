@@ -65,7 +65,10 @@ curl http://localhost:8000/health
 ### `POST /auth/register`
 
 Cria um novo usuario persistido no servidor e devolve um token JWT de acesso.
-O body deve enviar `terms_accepted=true`; sem esse aceite a API retorna `400`.
+O body deve enviar `terms_accepted=true` e `privacy_accepted=true`. Sem os dois aceites a API retorna `400`.
+As versoes vigentes de termo e privacidade sao gravadas no usuario e em um log de consentimento append-only.
+
+As versoes atuais podem ser consultadas em `GET /legal`.
 
 ### Body esperado
 
@@ -74,7 +77,8 @@ O body deve enviar `terms_accepted=true`; sem esse aceite a API retorna `400`.
   "display_name": "Adriano Lima",
   "email": "adriano@email.com",
   "password": "senha-forte-123",
-  "terms_accepted": true
+  "terms_accepted": true,
+  "privacy_accepted": true
 }
 ```
 
@@ -83,7 +87,7 @@ O body deve enviar `terms_accepted=true`; sem esse aceite a API retorna `400`.
 ```bash
 curl -X POST \
   -H "Content-Type: application/json" \
-  -d "{\"display_name\":\"Adriano Lima\",\"email\":\"adriano@email.com\",\"password\":\"senha-forte-123\",\"terms_accepted\":true}" \
+  -d "{\"display_name\":\"Adriano Lima\",\"email\":\"adriano@email.com\",\"password\":\"senha-forte-123\",\"terms_accepted\":true,\"privacy_accepted\":true}" \
   http://localhost:8000/auth/register
 ```
 
@@ -99,6 +103,11 @@ curl -X POST \
     "display_name": "Adriano Lima",
     "terms_accepted": true,
     "terms_accepted_at": "2026-06-08T12:00:00+00:00",
+    "terms_version": "tos_v1",
+    "privacy_accepted": true,
+    "privacy_accepted_at": "2026-06-08T12:00:00+00:00",
+    "privacy_version": "privacy_v1",
+    "needs_reconsent": false,
     "created_at": "2026-04-27T18:30:00+00:00",
     "updated_at": "2026-04-27T18:30:00+00:00"
   }
@@ -194,21 +203,44 @@ curl \
 ### `GET /users/me`
 
 Retorna o `user_id` resolvido pela autenticacao atual e, quando existir, tambem `email` e `display_name`.
-Tambem retorna `terms_accepted` e `terms_accepted_at` para o app decidir se precisa mostrar o termo para contas existentes.
+Tambem retorna `terms_accepted`, `privacy_accepted`, versoes vigentes e `needs_reconsent` para o app decidir se precisa mostrar termo e privacidade.
+
+### `GET /legal`
+
+Endpoint publico com os identificadores versionados atuais:
+
+```json
+{
+  "terms_of_service": {
+    "id": "terms_of_service",
+    "version": "tos_v1",
+    "title": "Termos de Uso"
+  },
+  "privacy_policy": {
+    "id": "privacy_policy",
+    "version": "privacy_v1",
+    "title": "Politica de Privacidade"
+  }
+}
+```
 
 ### `POST /users/me/terms/accept`
 
-Registra o aceite do termo de uso para o usuario autenticado. Deve ser chamado quando `terms_accepted=false`.
+Registra o aceite das versoes atuais de termo de uso e politica de privacidade.
+O fluxo antigo com `{ "accepted": true }` continua valido e agora tambem grava privacidade + versoes.
+Se o cliente enviar `privacy_accepted=false`, a API retorna `400`.
 
 Body esperado:
 
 ```json
 {
-  "accepted": true
+  "accepted": true,
+  "privacy_accepted": true
 }
 ```
 
 Contas reais sem aceite recebem `403` nos endpoints protegidos de uso ate registrar o aceite.
+Cada aceite e gravado em `consent_log` (append-only), com versao, timestamp, origem, IP e user-agent.
 
 ### Exemplo
 

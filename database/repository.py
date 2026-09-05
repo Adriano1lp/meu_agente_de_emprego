@@ -25,7 +25,7 @@ def initialize_database(database_path: Path | None = None) -> Path:
     with sqlite3.connect(database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(schema)
-        _ensure_terms_columns(connection)
+        _ensure_legal_schema(connection)
         connection.commit()
 
     return database_path
@@ -57,11 +57,13 @@ def create_user(user: dict[str, Any]) -> None:
             """
             INSERT INTO users (
                 user_id, email, display_name, password_hash, terms_accepted,
-                terms_accepted_at, created_at, updated_at
+                terms_accepted_at, terms_version, privacy_accepted,
+                privacy_accepted_at, privacy_version, created_at, updated_at
             )
             VALUES (
                 :user_id, :email, :display_name, :password_hash, :terms_accepted,
-                :terms_accepted_at, :created_at, :updated_at
+                :terms_accepted_at, :terms_version, :privacy_accepted,
+                :privacy_accepted_at, :privacy_version, :created_at, :updated_at
             )
             """,
             user,
@@ -103,7 +105,8 @@ def get_user_by_email(email: str) -> dict[str, Any] | None:
         row = connection.execute(
             """
             SELECT user_id, email, display_name, password_hash, terms_accepted,
-                terms_accepted_at, created_at, updated_at
+                terms_accepted_at, terms_version, privacy_accepted,
+                privacy_accepted_at, privacy_version, created_at, updated_at
             FROM users
             WHERE email = ? AND deleted_at IS NULL
             """,
@@ -120,7 +123,8 @@ def get_user_by_id(user_id: str) -> dict[str, Any] | None:
         row = connection.execute(
             """
             SELECT user_id, email, display_name, password_hash, terms_accepted,
-                terms_accepted_at, created_at, updated_at
+                terms_accepted_at, terms_version, privacy_accepted,
+                privacy_accepted_at, privacy_version, created_at, updated_at
             FROM users
             WHERE user_id = ? AND deleted_at IS NULL
             """,
@@ -130,28 +134,110 @@ def get_user_by_id(user_id: str) -> dict[str, Any] | None:
 
 
 def accept_user_terms(user_id: str, accepted_at: str) -> dict[str, Any] | None:
+    return accept_user_legal_documents(
+        user_id,
+        accepted_at=accepted_at,
+        terms_version=None,
+        privacy_version=None,
+    )
+
+
+def accept_user_legal_documents(
+    user_id: str,
+    *,
+    accepted_at: str,
+    terms_version: str | None,
+    privacy_version: str | None,
+) -> dict[str, Any] | None:
     if _use_mongodb():
-        return mongo_repository.accept_user_terms(user_id, accepted_at)
+        return mongo_repository.accept_user_legal_documents(
+            user_id,
+            accepted_at=accepted_at,
+            terms_version=terms_version,
+            privacy_version=privacy_version,
+        )
 
     with _connect() as connection:
         connection.execute(
             """
             UPDATE users
-            SET terms_accepted = 1, terms_accepted_at = ?, updated_at = ?
+            SET terms_accepted = 1,
+                terms_accepted_at = ?,
+                terms_version = COALESCE(?, terms_version),
+                privacy_accepted = 1,
+                privacy_accepted_at = ?,
+                privacy_version = COALESCE(?, privacy_version),
+                updated_at = ?
             WHERE user_id = ? AND deleted_at IS NULL
             """,
-            (accepted_at, accepted_at, user_id),
+            (
+                accepted_at,
+                terms_version,
+                accepted_at,
+                privacy_version,
+                accepted_at,
+                user_id,
+            ),
         )
         row = connection.execute(
             """
             SELECT user_id, email, display_name, password_hash, terms_accepted,
-                terms_accepted_at, created_at, updated_at
+                terms_accepted_at, terms_version, privacy_accepted,
+                privacy_accepted_at, privacy_version, created_at, updated_at
             FROM users
             WHERE user_id = ? AND deleted_at IS NULL
             """,
             (user_id,),
         ).fetchone()
         return _row_to_dict(row)
+
+
+def append_consent_log(entry: dict[str, Any]) -> None:
+    if _use_mongodb():
+        mongo_repository.append_consent_log(entry)
+        return
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO consent_log (
+                user_id, document_type, document_version, accepted, accepted_at,
+                source, ip_address, user_agent
+            )
+            VALUES (
+                :user_id, :document_type, :document_version, :accepted, :accepted_at,
+                :source, :ip_address, :user_agent
+            )
+            """,
+            {
+                "user_id": entry["user_id"],
+                "document_type": entry["document_type"],
+                "document_version": entry["document_version"],
+                "accepted": 1 if entry.get("accepted", True) else 0,
+                "accepted_at": entry["accepted_at"],
+                "source": entry.get("source") or "unknown",
+                "ip_address": entry.get("ip_address"),
+                "user_agent": entry.get("user_agent"),
+            },
+        )
+
+
+def list_consent_log(user_id: str) -> list[dict[str, Any]]:
+    if _use_mongodb():
+        return mongo_repository.list_consent_log(user_id)
+
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT consent_id, user_id, document_type, document_version, accepted,
+                accepted_at, source, ip_address, user_agent
+            FROM consent_log
+            WHERE user_id = ?
+            ORDER BY accepted_at ASC, consent_id ASC
+            """,
+            (user_id,),
+        ).fetchall()
+    return [_consent_row_to_dict(row) for row in rows]
 
 
 def update_user_password_hash(
@@ -179,7 +265,8 @@ def update_user_password_hash(
         row = connection.execute(
             """
             SELECT user_id, email, display_name, password_hash, terms_accepted,
-                terms_accepted_at, created_at, updated_at
+                terms_accepted_at, terms_version, privacy_accepted,
+                privacy_accepted_at, privacy_version, created_at, updated_at
             FROM users
             WHERE user_id = ? AND deleted_at IS NULL
             """,
@@ -709,17 +796,61 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row)
 
 
-def _ensure_terms_columns(connection: sqlite3.Connection) -> None:
+def _ensure_legal_schema(connection: sqlite3.Connection) -> None:
     columns = {
         row["name"] if isinstance(row, sqlite3.Row) else row[1]
         for row in connection.execute("PRAGMA table_info(users)").fetchall()
     }
-    if "terms_accepted" not in columns:
-        connection.execute(
-            "ALTER TABLE users ADD COLUMN terms_accepted INTEGER NOT NULL DEFAULT 0",
+    column_ddl = {
+        "terms_accepted": "INTEGER NOT NULL DEFAULT 0",
+        "terms_accepted_at": "TEXT",
+        "terms_version": "TEXT",
+        "privacy_accepted": "INTEGER NOT NULL DEFAULT 0",
+        "privacy_accepted_at": "TEXT",
+        "privacy_version": "TEXT",
+    }
+    for column_name, definition in column_ddl.items():
+        if column_name not in columns:
+            connection.execute(
+                f"ALTER TABLE users ADD COLUMN {column_name} {definition}",
+            )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS consent_log (
+            consent_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            document_type TEXT NOT NULL,
+            document_version TEXT NOT NULL,
+            accepted INTEGER NOT NULL DEFAULT 1,
+            accepted_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
-    if "terms_accepted_at" not in columns:
-        connection.execute("ALTER TABLE users ADD COLUMN terms_accepted_at TEXT")
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_consent_log_user_id
+            ON consent_log (user_id, accepted_at)
+        """
+    )
+
+
+def _consent_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "consent_id": row["consent_id"],
+        "user_id": row["user_id"],
+        "document_type": row["document_type"],
+        "document_version": row["document_version"],
+        "accepted": bool(row["accepted"]),
+        "accepted_at": row["accepted_at"],
+        "source": row["source"],
+        "ip_address": row["ip_address"],
+        "user_agent": row["user_agent"],
+    }
 
 
 def _json_or_none(value: Any) -> str | None:
