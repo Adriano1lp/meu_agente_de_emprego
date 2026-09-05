@@ -13,5 +13,6 @@ langchain-community==0.4.2
 langchain-text-splitters==1.1.2
 pymongo==4.17.0
 stripe==12.25.1
+boto3==1.40.61
 pytest==8.4.2
 httpx==0.28.1

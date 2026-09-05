@@ -10,6 +10,7 @@ import config
 from config import sanitize_user_id
 from database.repository import anonymize_and_purge_user, collect_user_export_payload
 from services.auth_users import get_user_by_id
+from services.object_storage import purge_user_objects
 
 SENSITIVE_EXPORT_KEYS = {
     "password",
@@ -57,6 +58,7 @@ def delete_current_user(user_id: str) -> dict[str, Any]:
 
 
 def _purge_user_files(user_id: str) -> None:
+    purge_user_objects(user_id)
     user_dir = config.USERS_DIR / user_id
     if user_dir.exists():
         shutil.rmtree(user_dir, ignore_errors=True)
