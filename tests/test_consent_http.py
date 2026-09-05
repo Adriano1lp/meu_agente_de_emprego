@@ -106,6 +106,9 @@ def test_register_and_consent_http_flow(isolated_db):
     blocked = client.get("/users/me", headers=headers)
     assert blocked.status_code == 403
     assert blocked.json()["detail"]["code"] == "TERMS_OUTDATED"
+    blocked_status = client.get("/users/me/status", headers=headers)
+    assert blocked_status.status_code == 403
+    assert blocked_status.json()["detail"]["code"] == "TERMS_OUTDATED"
 
     legal_still_public = client.get("/legal/terms", params={"version": "1.0"})
     assert legal_still_public.status_code == 200

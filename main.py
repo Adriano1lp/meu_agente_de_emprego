@@ -451,7 +451,7 @@ def create_manual_profile(
 
 
 @app.get("/users/me/status")
-def read_user_status(user_id: str = Depends(get_current_user_id)) -> dict[str, Any]:
+def read_user_status(user_id: str = Depends(_require_terms_accepted)) -> dict[str, Any]:
     cv_file = get_user_cv_file(user_id)
     chroma_dir = get_user_chroma_dir(user_id)
     output_dir = get_user_output_dir(user_id)
