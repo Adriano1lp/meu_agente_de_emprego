@@ -37,6 +37,11 @@ Consulte as versoes vigentes em `GET /legal`.
 
 Ao publicar uma nova versao dos documentos, atualize as env vars. Usuarios com versao antiga recebem `needs_reconsent=true` e devem chamar `POST /users/me/terms/accept`.
 
+### Direitos do titular (LGPD)
+
+- `GET /users/me/export` — JSON com os dados do usuario autenticado
+- `DELETE /users/me` — anonimiza a conta (`deleted_at`), apaga registros relacionados e remove arquivos em `storage/users/{user_id}/`
+
 ## Testes
 
 ```bash

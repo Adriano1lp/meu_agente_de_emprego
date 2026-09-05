@@ -185,6 +185,8 @@ Depois do deploy:
 7. `GET /users/me/status`
 8. `POST /processar`
 9. `GET /users/me/files/{nome_do_arquivo}`
+10. `GET /users/me/export`
+11. `DELETE /users/me` (somente em conta de teste)
 
 ## Exemplos de smoke test
 

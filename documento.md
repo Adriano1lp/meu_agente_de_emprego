@@ -242,6 +242,21 @@ Body esperado:
 Contas reais sem aceite recebem `403` nos endpoints protegidos de uso ate registrar o aceite.
 Cada aceite e gravado em `consent_log` (append-only), com versao, timestamp, origem, IP e user-agent.
 
+### `GET /users/me/export`
+
+Exporta em JSON os dados do titular autenticado (conta, consentimentos, perfil, documentos, processamentos, PDI e metadados de arquivos). Nao inclui `password_hash`.
+
+### `DELETE /users/me`
+
+Exclui a conta do titular autenticado:
+
+- define `deleted_at` e anonimiza email/nome/senha
+- apaga registros relacionados (perfil, documentos, embeddings, processamentos, PDI, arquivos gerados, tokens de reset)
+- remove `storage/users/{user_id}/`
+- o log de consentimento e preservado como evidencia legal
+
+Apos a exclusao, `GET /auth/me` retorna `404` e o login com o email original retorna `401`.
+
 ### Exemplo
 
 ```bash

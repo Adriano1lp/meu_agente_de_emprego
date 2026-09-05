@@ -240,6 +240,21 @@ def list_consent_log(user_id: str) -> list[dict[str, Any]]:
     return [_consent_row_to_dict(row) for row in rows]
 
 
+def collect_user_export_payload(user_id: str) -> dict[str, Any]:
+    if _use_mongodb():
+        return mongo_repository.collect_user_export_payload(user_id)
+    return _sqlite_collect_user_export_payload(user_id)
+
+
+def anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
+    if _use_mongodb():
+        return mongo_repository.anonymize_and_purge_user(
+            user_id,
+            deleted_at=deleted_at,
+        )
+    return _sqlite_anonymize_and_purge_user(user_id, deleted_at=deleted_at)
+
+
 def update_user_password_hash(
     *,
     user_id: str,
@@ -851,6 +866,185 @@ def _consent_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "ip_address": row["ip_address"],
         "user_agent": row["user_agent"],
     }
+
+
+def _sqlite_collect_user_export_payload(user_id: str) -> dict[str, Any]:
+    with _connect() as connection:
+        user_row = connection.execute(
+            """
+            SELECT user_id, email, display_name, terms_accepted, terms_accepted_at,
+                terms_version, privacy_accepted, privacy_accepted_at, privacy_version,
+                created_at, updated_at
+            FROM users
+            WHERE user_id = ? AND deleted_at IS NULL
+            """,
+            (user_id,),
+        ).fetchone()
+        if not user_row:
+            return {}
+
+        profile_row = connection.execute(
+            """
+            SELECT user_id, version, profile_json, updated_at
+            FROM user_profiles
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        version_rows = connection.execute(
+            """
+            SELECT version, profile_json, created_at
+            FROM user_profile_versions
+            WHERE user_id = ?
+            ORDER BY version ASC
+            """,
+            (user_id,),
+        ).fetchall()
+        document_rows = connection.execute(
+            """
+            SELECT document_id, document_type, original_filename, original_content_type,
+                original_file_path, extracted_text_path, bytes_received, checksum_sha256,
+                created_at
+            FROM user_documents
+            WHERE user_id = ?
+            ORDER BY created_at ASC
+            """,
+            (user_id,),
+        ).fetchall()
+        processing_rows = connection.execute(
+            """
+            SELECT processing_run_id, input_text, job_data_json, matching_json,
+                optimization_json, response_text, status, error_message, created_at,
+                completed_at
+            FROM processing_runs
+            WHERE user_id = ?
+            ORDER BY created_at ASC
+            """,
+            (user_id,),
+        ).fetchall()
+        file_rows = connection.execute(
+            """
+            SELECT generated_file_id, file_name, file_path, public_url, media_type,
+                bytes_size, created_at
+            FROM generated_files
+            WHERE user_id = ?
+            ORDER BY created_at ASC
+            """,
+            (user_id,),
+        ).fetchall()
+
+    return {
+        "user": dict(user_row),
+        "consent_log": list_consent_log(user_id),
+        "profile": {
+            "user_id": profile_row["user_id"],
+            "version": profile_row["version"],
+            "updated_at": profile_row["updated_at"],
+            "profile": json.loads(profile_row["profile_json"]),
+        } if profile_row else None,
+        "profile_versions": [
+            {
+                "version": row["version"],
+                "created_at": row["created_at"],
+                "profile": json.loads(row["profile_json"]),
+            }
+            for row in version_rows
+        ],
+        "documents": [
+            {
+                **dict(row),
+                "extracted_text": _read_text_file(row["extracted_text_path"]),
+            }
+            for row in document_rows
+        ],
+        "processing_runs": [
+            {
+                "processing_run_id": row["processing_run_id"],
+                "input_text": row["input_text"],
+                "job_data": _json_load_or_none(row["job_data_json"]),
+                "matching": _json_load_or_none(row["matching_json"]),
+                "optimization": _json_load_or_none(row["optimization_json"]),
+                "response_text": row["response_text"],
+                "status": row["status"],
+                "error_message": row["error_message"],
+                "created_at": row["created_at"],
+                "completed_at": row["completed_at"],
+            }
+            for row in processing_rows
+        ],
+        "job_analysis_insights": list_job_analysis_insights(
+            user_id,
+            limit=1000,
+            offset=0,
+        ),
+        "development_plans": list_development_plans(user_id, limit=1000, offset=0),
+        "generated_files": [dict(row) for row in file_rows],
+    }
+
+
+def _sqlite_anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
+    with _connect() as connection:
+        user_row = connection.execute(
+            "SELECT user_id FROM users WHERE user_id = ? AND deleted_at IS NULL",
+            (user_id,),
+        ).fetchone()
+        if not user_row:
+            return False
+
+        for table_name in (
+            "generated_files",
+            "job_analysis_insights",
+            "development_plans",
+            "processing_runs",
+            "embedding_runs",
+            "user_documents",
+            "user_profile_versions",
+            "user_profiles",
+            "password_reset_tokens",
+        ):
+            connection.execute(
+                f"DELETE FROM {table_name} WHERE user_id = ?",
+                (user_id,),
+            )
+
+        connection.execute(
+            """
+            UPDATE users
+            SET email = ?,
+                display_name = ?,
+                password_hash = ?,
+                updated_at = ?,
+                deleted_at = ?
+            WHERE user_id = ?
+            """,
+            (
+                f"deleted_{user_id}@deleted.invalid",
+                "Conta excluida",
+                "deleted_account",
+                deleted_at,
+                deleted_at,
+                user_id,
+            ),
+        )
+    return True
+
+
+def _read_text_file(path_value: str | None) -> str | None:
+    if not path_value:
+        return None
+    path = Path(path_value)
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="latin-1")
+
+
+def _json_load_or_none(value: str | None) -> Any:
+    if not value:
+        return None
+    return json.loads(value)
 
 
 def _json_or_none(value: Any) -> str | None:

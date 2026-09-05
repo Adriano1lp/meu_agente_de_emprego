@@ -44,6 +44,7 @@ from services.auth_users import (
     request_password_reset,
     user_can_access_terms_protected_routes,
 )
+from services.account import delete_current_user, export_current_user
 from services.legal import current_legal_documents
 from services.development_plan import (
     DEFAULT_ANALYSIS_LIMIT,
@@ -334,6 +335,20 @@ def accept_current_user_terms(
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
+
+
+@app.get("/users/me/export")
+def export_current_user_data(
+    user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    return export_current_user(user_id)
+
+
+@app.delete("/users/me")
+def delete_current_user_account(
+    user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    return delete_current_user(user_id)
 
 
 @app.post("/users/me/upload-cv")
