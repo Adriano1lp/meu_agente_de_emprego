@@ -34,6 +34,7 @@ def initialize_database(database_path: Path | None = None) -> Path:
         connection.executescript(schema)
         _ensure_consent_columns(connection)
         _ensure_billing_schema(connection)
+        _ensure_object_storage_schema(connection)
         connection.commit()
 
     return database_path
@@ -433,16 +434,23 @@ def create_user_document(document: dict[str, Any]) -> int | str:
         return mongo_repository.create_user_document(document)
 
     ensure_user_exists(document["user_id"])
+    document = {
+        **document,
+        "object_key": document.get("object_key"),
+        "extracted_text_object_key": document.get("extracted_text_object_key"),
+    }
     with _connect() as connection:
         cursor = connection.execute(
             """
             INSERT INTO user_documents (
                 user_id, document_type, original_filename, original_content_type,
-                original_file_path, extracted_text_path, bytes_received, checksum_sha256
+                original_file_path, object_key, extracted_text_path,
+                extracted_text_object_key, bytes_received, checksum_sha256
             )
             VALUES (
                 :user_id, :document_type, :original_filename, :original_content_type,
-                :original_file_path, :extracted_text_path, :bytes_received, :checksum_sha256
+                :original_file_path, :object_key, :extracted_text_path,
+                :extracted_text_object_key, :bytes_received, :checksum_sha256
             )
             """,
             document,
@@ -660,16 +668,17 @@ def create_generated_file(file_data: dict[str, Any]) -> int | str:
         return mongo_repository.create_generated_file(file_data)
 
     ensure_user_exists(file_data["user_id"])
+    file_data = {**file_data, "object_key": file_data.get("object_key")}
     with _connect() as connection:
         cursor = connection.execute(
             """
             INSERT INTO generated_files (
-                user_id, processing_run_id, file_name, file_path, public_url,
-                media_type, bytes_size
+                user_id, processing_run_id, file_name, file_path, object_key,
+                public_url, media_type, bytes_size
             )
             VALUES (
-                :user_id, :processing_run_id, :file_name, :file_path, :public_url,
-                :media_type, :bytes_size
+                :user_id, :processing_run_id, :file_name, :file_path, :object_key,
+                :public_url, :media_type, :bytes_size
             )
             """,
             file_data,
@@ -1000,7 +1009,8 @@ def _sqlite_collect_user_export_payload(user_id: str) -> dict[str, Any]:
         ).fetchone()
         document_rows = connection.execute(
             """
-            SELECT original_filename, original_content_type, document_type, created_at
+            SELECT original_filename, original_content_type, document_type,
+                object_key, created_at
             FROM user_documents
             WHERE user_id = ?
             ORDER BY created_at ASC, document_id ASC
@@ -1020,7 +1030,7 @@ def _sqlite_collect_user_export_payload(user_id: str) -> dict[str, Any]:
         ).fetchall()
         file_rows = connection.execute(
             """
-            SELECT file_name, media_type, created_at
+            SELECT file_name, media_type, object_key, created_at
             FROM generated_files
             WHERE user_id = ?
             ORDER BY created_at ASC, generated_file_id ASC
@@ -1278,6 +1288,33 @@ def _ensure_billing_schema(connection: sqlite3.Connection) -> None:
         """
         INSERT OR IGNORE INTO schema_migrations (version, name)
         VALUES (3, 'stripe_essencial_quotas')
+        """
+    )
+
+
+def _ensure_object_storage_schema(connection: sqlite3.Connection) -> None:
+    document_columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in connection.execute("PRAGMA table_info(user_documents)").fetchall()
+    }
+    if "object_key" not in document_columns:
+        connection.execute("ALTER TABLE user_documents ADD COLUMN object_key TEXT")
+    if "extracted_text_object_key" not in document_columns:
+        connection.execute(
+            "ALTER TABLE user_documents ADD COLUMN extracted_text_object_key TEXT",
+        )
+
+    generated_columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in connection.execute("PRAGMA table_info(generated_files)").fetchall()
+    }
+    if "object_key" not in generated_columns:
+        connection.execute("ALTER TABLE generated_files ADD COLUMN object_key TEXT")
+
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO schema_migrations (version, name)
+        VALUES (4, 'object_storage_keys')
         """
     )
 

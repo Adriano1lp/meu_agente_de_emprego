@@ -605,10 +605,16 @@ def _build_user_retriever(user_id: str):
 
 def _read_cv_file(user_id: str) -> str:
     cv_path = get_user_cv_file(user_id)
-    if not cv_path.exists():
-        return get_latest_user_cv_text(user_id) or ""
+    if cv_path.exists():
+        return cv_path.read_text(encoding="utf-8").strip()
 
-    return cv_path.read_text(encoding="utf-8").strip()
+    from services.object_storage import get_bytes, user_object_key
+
+    remote_cv = get_bytes(user_object_key(user_id, "documents", cv_path.name))
+    if remote_cv:
+        return remote_cv.decode("utf-8").strip()
+
+    return get_latest_user_cv_text(user_id) or ""
 
 
 def _use_mongodb_embeddings() -> bool:

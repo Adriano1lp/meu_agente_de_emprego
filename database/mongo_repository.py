@@ -579,6 +579,7 @@ def collect_user_export_payload(user_id: str) -> dict[str, Any]:
             "original_filename": document.get("original_filename"),
             "original_content_type": document.get("original_content_type"),
             "document_type": document.get("document_type"),
+            "object_key": document.get("object_key"),
             "created_at": document.get("created_at"),
         }
         for document in _get_collection("user_documents").find(
@@ -588,6 +589,7 @@ def collect_user_export_payload(user_id: str) -> dict[str, Any]:
                 "original_filename": 1,
                 "original_content_type": 1,
                 "document_type": 1,
+                "object_key": 1,
                 "created_at": 1,
             },
             sort=[("created_at", 1)],
@@ -604,11 +606,12 @@ def collect_user_export_payload(user_id: str) -> dict[str, Any]:
         {
             "file_name": document.get("file_name"),
             "media_type": document.get("media_type"),
+            "object_key": document.get("object_key"),
             "created_at": document.get("created_at"),
         }
         for document in _get_collection("generated_files").find(
             {"user_id": user_id},
-            {"_id": 0, "file_name": 1, "media_type": 1, "created_at": 1},
+            {"_id": 0, "file_name": 1, "media_type": 1, "object_key": 1, "created_at": 1},
             sort=[("created_at", 1)],
         )
     ]

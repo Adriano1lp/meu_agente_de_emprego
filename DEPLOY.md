@@ -12,7 +12,7 @@ O backend atual e adequado para:
 
 Para esse cenario, a maior preocupacao nao e escala de CPU e sim:
 
-- persistencia do `storage/`
+- persistencia do `storage/` em local/dev e object storage R2/S3 em producao
 - segredo JWT seguro
 - CORS restrito ao dominio real do app
 
@@ -21,21 +21,24 @@ Para esse cenario, a maior preocupacao nao e escala de CPU e sim:
 - FastAPI
 - Uvicorn
 - JWT assinado com HMAC SHA-256
-- armazenamento local em disco para:
-  - contas em `storage/auth/users.json`
-  - curriculos em `storage/users/{user_id}/documents/`
-  - embeddings em `storage/users/{user_id}/chroma/`
-  - PDFs em `storage/users/{user_id}/outputs/`
+- armazenamento de arquivos:
+  - local/dev: `storage/users/{user_id}/...` quando env S3 estiver ausente
+  - producao: Cloudflare R2 (S3-compativel), keys `users/{user_id}/...`, bucket privado
+  - embeddings locais em `storage/users/{user_id}/chroma/` (MongoDB em producao)
 
 ## Variaveis de ambiente obrigatorias
 
 - `OPENAI_API_KEY`
-- `ENVIRONMENT=production`
+- `ENVIRONMENT=production` (alias aceito: `ENV=production`)
 - `AUTH_MODE=jwt`
 - `JWT_SECRET`
 - `CORS_ALLOW_ORIGINS`
 - `MONGODB_URI`
 - `MONGODB_DATABASE`
+- `S3_ENDPOINT`
+- `S3_BUCKET`
+- `S3_ACCESS_KEY_ID`
+- `S3_SECRET_ACCESS_KEY`
 
 ## Variaveis de ambiente fortemente recomendadas
 
@@ -50,6 +53,8 @@ Para esse cenario, a maior preocupacao nao e escala de CPU e sim:
 - `STRIPE_WEBHOOK_SECRET` (pode faltar em teste; sem ela o webhook retorna 503 e nao processa)
 - `STRIPE_CHECKOUT_SUCCESS_URL`
 - `STRIPE_CHECKOUT_CANCEL_URL`
+- `S3_REGION` (padrao `auto` no R2)
+- `S3_SIGNED_URL_EXPIRES` (maximo 900 segundos / 15 min)
 
 ## Exemplo de configuracao para Render
 
@@ -73,6 +78,12 @@ STRIPE_PRICE_ESSENCIAL=price_...
 STRIPE_WEBHOOK_SECRET=whsec_...
 STRIPE_CHECKOUT_SUCCESS_URL=https://seu-app.onrender.com/?billing=success
 STRIPE_CHECKOUT_CANCEL_URL=https://seu-app.onrender.com/?billing=cancel
+S3_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com
+S3_BUCKET=meu-agente-de-emprego
+S3_ACCESS_KEY_ID=
+S3_SECRET_ACCESS_KEY=
+S3_REGION=auto
+S3_SIGNED_URL_EXPIRES=900
 ```
 
 ## Validacoes de seguranca no startup
@@ -82,8 +93,9 @@ Quando `ENVIRONMENT=production`, a API agora falha ao iniciar se:
 - `JWT_SECRET` estiver como `dev-secret-change-me`
 - `CORS_ALLOW_ORIGINS` estiver vazio ou com `*`
 - `MONGODB_URI` nao estiver configurada
+- `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID` ou `S3_SECRET_ACCESS_KEY` estiverem ausentes
 
-Isso evita deploy acidental com configuracao insegura.
+Isso evita deploy acidental com configuracao insegura. Em local/dev, sem env S3, o fallback continua em disco.
 
 ## Render
 
@@ -125,11 +137,9 @@ Atencao: o filesystem do Render pode ser efemero. A API agora deve usar MongoDB 
 - embeddings e chunks de contexto
 - registros de processamento
 
-Os PDFs gerados ainda sao arquivos locais em `storage/users/{user_id}/outputs/`. Se precisar manter downloads depois de redeploy/restart, configure disco persistente ou mova os PDFs para storage externo.
+PDFs gerados e uploads de curriculo devem ir para o object storage R2/S3 (`S3_*`) para sobreviver a redeploy. O banco guarda metadados + `object_key`. Download e autenticado (so o dono) via proxy em `GET /users/me/files/{nome}` ou signed URL de no maximo 15 minutos. O bucket permanece privado.
 
-Sem MongoDB, voce ainda pode perder:
-
-- PDFs gerados
+Sem object storage remoto em producao a API recusa subir. Em local/dev, sem env S3, os arquivos continuam em `STORAGE_DIR`.
 
 ## 5. Dominio publico
 
@@ -178,7 +188,7 @@ Antes de publicar:
 3. Confirmar que `CORS_ALLOW_ORIGINS` nao esta com `*`
 4. Confirmar que `OPENAI_API_KEY` esta configurada
 5. Confirmar que `PUBLIC_BASE_URL` aponta para a URL real da API
-6. Confirmar que `STORAGE_DIR` esta em local persistente ou aceitar conscientemente o risco
+6. Confirmar que `S3_ENDPOINT`, `S3_BUCKET` e as chaves R2 estao configuradas
 
 ## Checklist de smoke test
 

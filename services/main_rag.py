@@ -161,6 +161,13 @@ def _get_existing_user_cv_file(user_id: str) -> Path | None:
     if cv_file.exists():
         return cv_file
 
+    from services.object_storage import get_bytes, user_object_key
+
+    remote_cv = get_bytes(user_object_key(user_id, "documents", cv_file.name))
+    if remote_cv:
+        cv_file.write_bytes(remote_cv)
+        return cv_file
+
     cv_text = get_latest_user_cv_text(user_id)
     if cv_text:
         cv_file.write_text(cv_text, encoding="utf-8")

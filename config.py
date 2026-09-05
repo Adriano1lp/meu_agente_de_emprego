@@ -36,7 +36,9 @@ OPENAI_EMBEDDING_MODEL = os.getenv(
 
 APP_NAME = os.getenv("APP_NAME", "Analista de Vagas API").strip()
 APP_VERSION = os.getenv("APP_VERSION", "1.0.0").strip()
-ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower() or "development"
+ENVIRONMENT = (
+    os.getenv("ENV") or os.getenv("ENVIRONMENT") or "development"
+).strip().lower() or "development"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 AUTH_MODE = os.getenv("AUTH_MODE", "jwt").strip().lower() or "jwt"
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me").strip()
@@ -69,6 +71,26 @@ CORS_ALLOW_ORIGINS = [
 ]
 AUTH_DIR = STORAGE_DIR / "auth"
 AUTH_USERS_FILE = AUTH_DIR / "users.json"
+S3_ENDPOINT = (
+    os.getenv("S3_ENDPOINT") or os.getenv("S3_ENDPOINT_URL") or ""
+).strip()
+S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
+S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
+S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
+S3_REGION = os.getenv("S3_REGION", "auto").strip() or "auto"
+S3_SIGNED_URL_MAX_SECONDS = 15 * 60
+S3_SIGNED_URL_EXPIRES = min(
+    max(int(os.getenv("S3_SIGNED_URL_EXPIRES", str(S3_SIGNED_URL_MAX_SECONDS))), 1),
+    S3_SIGNED_URL_MAX_SECONDS,
+)
+OBJECT_STORAGE_BACKEND = (
+    os.getenv("OBJECT_STORAGE_BACKEND", "").strip().lower()
+    or (
+        "s3"
+        if S3_ENDPOINT and S3_BUCKET and S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY
+        else "local"
+    )
+)
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -145,8 +167,19 @@ def ensure_openai_api_key() -> str:
     return OPENAI_API_KEY
 
 
+def is_production_environment() -> bool:
+    env = (
+        os.getenv("ENV") or os.getenv("ENVIRONMENT") or ENVIRONMENT or "development"
+    ).strip().lower()
+    return env in {"production", "prod"}
+
+
+def s3_configured() -> bool:
+    return bool(S3_ENDPOINT and S3_BUCKET and S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY)
+
+
 def ensure_runtime_config() -> None:
-    is_production = ENVIRONMENT in {"production", "prod"}
+    is_production = is_production_environment()
 
     if not is_production:
         return
@@ -166,4 +199,10 @@ def ensure_runtime_config() -> None:
         raise RuntimeError(
             "MongoDB obrigatorio em producao. Defina MONGODB_URI e "
             "MONGODB_DATABASE no Render para manter usuarios e embeddings persistentes."
+        )
+
+    if not s3_configured():
+        raise RuntimeError(
+            "Object storage S3/R2 obrigatorio em producao. "
+            "Defina S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID e S3_SECRET_ACCESS_KEY."
         )

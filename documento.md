@@ -299,6 +299,7 @@ Efeito:
 - apaga perfil, documentos, processamentos, embeddings, arquivos gerados e
   tokens de reset ligados ao `user_id`
 - remove `storage/users/{user_id}/` (curriculo, chroma, PDFs)
+- faz purge de todos os objects no prefixo `users/{user_id}/` (R2/S3)
 - `consent_log` permanece append-only (doc, version, accepted_at, user_id)
 - login com o email original falha (`401`); o email fica livre para um novo cadastro
   (o `user_id` da conta apagada permanece no stub; o recadastro recebe um id novo)
@@ -328,8 +329,10 @@ Resposta esperada:
 
 Recebe o curriculo do usuario autenticado e salva:
 
-- o arquivo original em `storage/users/{user_id}/documents/`
-- o texto extraido em `storage/users/{user_id}/documents/cv.txt`
+- o arquivo original na key `users/{user_id}/documents/cv_original.{ext}`
+- o texto extraido na key `users/{user_id}/documents/cv.txt`
+- metadados + `object_key` no banco (`user_documents`)
+- em local/dev sem env S3, o backend grava os mesmos caminhos em `storage/`
 
 ### Formatos aceitos
 
@@ -872,7 +875,10 @@ Quando todos os pesos forem concluidos, o PDI passa para `completed`. Se algum i
 
 ### `GET /users/me/files/{nome_do_arquivo}`
 
-Serve os PDFs gerados pelo proprio usuario autenticado.
+Serve os PDFs gerados pelo proprio usuario autenticado. O download e um
+**proxy autenticado**: so o dono (JWT) acessa a key `users/{user_id}/outputs/{nome}`.
+O bucket R2/S3 permanece privado, sem ACL publica. Signed URL, se usada
+internamente, expira em no maximo 15 minutos.
 
 ### Exemplo
 
@@ -885,9 +891,10 @@ curl \
 
 ### Regras importantes
 
-- o arquivo precisa existir dentro de `storage/users/{user_id}/outputs/`
+- o arquivo precisa existir na key do dono (`users/{user_id}/outputs/{nome}`)
 - um usuario nao consegue baixar o arquivo de outro usuario
 - o endpoint retorna `404` quando o arquivo nao pertence ao usuario autenticado
+- em local/dev sem S3, o fallback continua em `storage/users/{user_id}/outputs/`
 
 ## Fluxo recomendado de uso
 
@@ -953,9 +960,14 @@ Em producao, os dados de negocio ficam em colecoes MongoDB separadas por `user_i
 - `processar_usage`
 - `stripe_webhook_events`
 
-Arquivos gerados para download continuam em:
+Arquivos de usuario (curriculo original, `cv.txt` e PDFs gerados) usam object
+storage S3-compativel (Cloudflare R2 em producao). A key sempre comeca com
+`users/{user_id}/`. O banco guarda metadados + `object_key`; path local nao e
+obrigatorio depois do upload.
 
-- `storage/users/{user_id}/outputs/`
+Em local/dev, se `S3_ENDPOINT` / `S3_BUCKET` / chaves estiverem ausentes, o
+backend `local` grava em `STORAGE_DIR`. Em `ENV=production` ou
+`ENVIRONMENT=production` a API falha no boot sem essas vars.
 
 ## Variaveis de ambiente relevantes
 
@@ -977,3 +989,9 @@ Arquivos gerados para download continuam em:
 - `STRIPE_WEBHOOK_SECRET` (pode faltar em teste/local; webhook fica `503`)
 - `STRIPE_CHECKOUT_SUCCESS_URL`
 - `STRIPE_CHECKOUT_CANCEL_URL`
+- `S3_ENDPOINT` (alias aceito: `S3_ENDPOINT_URL`)
+- `S3_BUCKET`
+- `S3_ACCESS_KEY_ID`
+- `S3_SECRET_ACCESS_KEY`
+- `S3_REGION` (padrao `auto`)
+- `S3_SIGNED_URL_EXPIRES` (maximo 900)

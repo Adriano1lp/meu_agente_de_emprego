@@ -94,7 +94,9 @@ CREATE TABLE IF NOT EXISTS user_documents (
     original_filename TEXT NOT NULL,
     original_content_type TEXT NOT NULL,
     original_file_path TEXT NOT NULL,
+    object_key TEXT,
     extracted_text_path TEXT,
+    extracted_text_object_key TEXT,
     bytes_received INTEGER NOT NULL,
     checksum_sha256 TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -209,6 +211,7 @@ CREATE TABLE IF NOT EXISTS generated_files (
     processing_run_id INTEGER,
     file_name TEXT NOT NULL,
     file_path TEXT NOT NULL,
+    object_key TEXT,
     public_url TEXT,
     media_type TEXT NOT NULL DEFAULT 'application/pdf',
     bytes_size INTEGER,
@@ -247,3 +250,6 @@ VALUES (2, 'versioned_consent_log');
 
 INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (3, 'stripe_essencial_quotas');
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (4, 'object_storage_keys');
