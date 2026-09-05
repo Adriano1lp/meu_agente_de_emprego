@@ -29,10 +29,6 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
-CREATE INDEX IF NOT EXISTS idx_users_stripe_customer
-    ON users (stripe_customer_id);
-CREATE INDEX IF NOT EXISTS idx_users_stripe_subscription
-    ON users (stripe_subscription_id);
 
 CREATE TABLE IF NOT EXISTS consent_log (
     consent_id INTEGER PRIMARY KEY AUTOINCREMENT,
