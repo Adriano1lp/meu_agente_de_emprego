@@ -47,6 +47,12 @@ from services.auth_users import (
     request_password_reset,
 )
 from services.account import delete_current_user, export_current_user
+from services.billing import (
+    consume_processar_quota,
+    create_checkout_session,
+    get_entitlement,
+    handle_stripe_webhook,
+)
 from services.legal import get_legal_markdown
 from services.development_plan import (
     DEFAULT_ANALYSIS_LIMIT,
@@ -347,6 +353,8 @@ def get_current_user(user_id: str = Depends(_require_terms_accepted)) -> dict[st
         "privacy_accepted": bool(user.get("privacy_accepted")) if user else False,
         "privacy_accepted_at": user.get("privacy_accepted_at") if user else None,
         "privacy_version": user.get("privacy_version") if user else None,
+        "plan": user.get("plan") if user else "free",
+        "subscription_status": user.get("subscription_status") if user else "none",
     }
     if user:
         response["email"] = user["email"]
@@ -390,6 +398,37 @@ def accept_current_user_terms(
     if not payload.accepted:
         raise HTTPException(status_code=400, detail="Aceite do termo de uso obrigatorio")
     return accept_terms_for_user(user_id)
+
+
+@app.get("/billing/me")
+def read_billing_entitlement(
+    user_id: str = Depends(_require_terms_accepted),
+) -> dict[str, Any]:
+    entitlement = get_entitlement(user_id)
+    return {
+        "plan": entitlement["plan"],
+        "subscription_status": entitlement["subscription_status"],
+        "used": entitlement["used"],
+        "limit": entitlement["limit"],
+        "period": entitlement["period"],
+        "remaining": entitlement["remaining"],
+    }
+
+
+@app.post("/billing/checkout")
+def create_billing_checkout(
+    user_id: str = Depends(_require_terms_accepted),
+) -> dict[str, str]:
+    return create_checkout_session(user_id)
+
+
+@app.post("/billing/webhook")
+async def billing_webhook(
+    request: Request,
+    stripe_signature: str | None = Header(default=None, alias="Stripe-Signature"),
+) -> dict[str, Any]:
+    payload = await request.body()
+    return handle_stripe_webhook(payload, stripe_signature)
 
 
 @app.get("/users/me/export")
@@ -618,6 +657,8 @@ def processar(
     texto_entrada = request_data.texto.strip()
     if not texto_entrada:
         raise HTTPException(status_code=400, detail="Texto nao pode ser vazio")
+
+    consume_processar_quota(user_id)
 
     try:
         pipeline_result = pipeline_with_details(texto_entrada, user_id)

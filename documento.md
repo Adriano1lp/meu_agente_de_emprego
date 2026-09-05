@@ -573,7 +573,85 @@ curl \
 }
 ```
 
-## 11. Processar uma vaga
+## 11. Billing Stripe (plano Essencial)
+
+Cotas e assinatura sao avaliadas **no servidor**. Nesta fatia a cota vale apenas para `POST /processar`. Carta, PDI e embeddings nao consomem cota.
+
+### Planos
+
+| Plano | Preco | Cota de `POST /processar` | Entitlement |
+| --- | --- | --- | --- |
+| Free | — | **5** por mes civil UTC | sem assinatura `active` |
+| Essencial | **R$ 19,90/mes** | **30** por mes civil UTC | Stripe `subscription_status=active` |
+
+O contador e por `user_id` + `YYYY-MM` (UTC) e zera automaticamente no dia 1 de cada mes UTC. `past_due` nao conta como Essencial (grace 0 dias): a cota efetiva volta a 5. Cancelamento/exclusao da assinatura grava `plan=free` e cota 5.
+
+### `GET /billing/me`
+
+Autenticado + consentimento vigente. Devolve o entitlement efetivo.
+
+```bash
+curl -H "Authorization: Bearer <jwt>" http://localhost:8000/billing/me
+```
+
+```json
+{
+  "plan": "free",
+  "subscription_status": "none",
+  "used": 0,
+  "limit": 5,
+  "period": "2026-09",
+  "remaining": 5
+}
+```
+
+### `POST /billing/checkout`
+
+Autenticado + consentimento vigente. Cria uma Stripe Checkout Session `mode=subscription` no preco `STRIPE_PRICE_ESSENCIAL`.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer <jwt>" \
+  http://localhost:8000/billing/checkout
+```
+
+```json
+{
+  "checkout_url": "https://checkout.stripe.com/c/pay/cs_...",
+  "session_id": "cs_..."
+}
+```
+
+Sem `STRIPE_SECRET_KEY` ou `STRIPE_PRICE_ESSENCIAL` a API responde `503`. URLs de sucesso/cancelamento: `STRIPE_CHECKOUT_SUCCESS_URL` e `STRIPE_CHECKOUT_CANCEL_URL` (fallback em `PUBLIC_BASE_URL`).
+
+### `POST /billing/webhook`
+
+Publico. **Sempre** valida `Stripe-Signature` com `STRIPE_WEBHOOK_SECRET`. Eventos processados de forma idempotente (`event.id`):
+
+- `checkout.session.completed`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
+- `invoice.paid`
+- `invoice.payment_failed`
+
+O usuario persiste `stripe_customer_id`, `stripe_subscription_id`, `plan` (`free`|`essencial`) e `subscription_status` (`active`|`past_due`|`canceled`|`none`). Sem `STRIPE_WEBHOOK_SECRET` a rota responde `503` e nao processa o evento.
+
+Nao ha Customer Portal nesta fatia.
+
+### Como testar
+
+1. Sem chaves Stripe: cadastre um usuario, chame `GET /billing/me` (limit 5) e `POST /processar` seis vezes — a sexta deve ser `402` com `code=SUBSCRIPTION_REQUIRED`.
+2. Checkout local: defina `STRIPE_SECRET_KEY` e `STRIPE_PRICE_ESSENCIAL` (Price mensal BRL 1990 no Dashboard) e chame `POST /billing/checkout`.
+3. Webhook: `stripe listen --forward-to localhost:8000/billing/webhook` com `STRIPE_WEBHOOK_SECRET` do CLI. Conclua o Checkout de teste; `GET /billing/me` deve mostrar `plan=essencial` e `limit=30`.
+4. Reenviar o mesmo evento (mesmo `id`) deve responder `200` com `duplicate: true` e nao alterar o usuario.
+
+Testes automatizados (Stripe mockado, sem rede):
+
+```bash
+pytest tests/test_billing.py
+```
+
+## 12. Processar uma vaga
 
 ### `POST /processar`
 
@@ -639,8 +717,11 @@ Cada chamada valida de `POST /processar` tambem registra um historico estruturad
 
 ### Erros comuns
 
-- `400`: `texto` vazio
+- `400`: `texto` vazio (nao consome cota)
 - `400`: embeddings do usuario ainda nao gerados
+- `402`: cota do mes esgotada. Body em `detail`:
+  `{ "code": "QUOTA_EXCEEDED"|"SUBSCRIPTION_REQUIRED", "message": "...", "used": 5, "limit": 5, "plan": "free" }`
+  Free esgotado usa `SUBSCRIPTION_REQUIRED`; Essencial esgotado usa `QUOTA_EXCEEDED`.
 - `500`: erro interno ao processar LLM, embeddings ou geracao de PDF
 
 ## 12. Historico de gaps do usuario
@@ -818,11 +899,12 @@ curl \
 6. `POST /users/me/upload-cv`
 7. `POST /users/me/rebuild-embeddings`
 8. `GET /users/me/status`
-9. `POST /processar`
-10. `GET /users/me/gap-history`
-11. `POST /users/me/development-plan/generate`
-12. `GET /users/me/development-plan/active`
-13. `GET /users/me/files/{nome_do_arquivo}`
+9. `GET /billing/me`
+10. `POST /processar`
+11. `GET /users/me/gap-history`
+12. `POST /users/me/development-plan/generate`
+13. `GET /users/me/development-plan/active`
+14. `GET /users/me/files/{nome_do_arquivo}`
 
 ## Recuperacao de usuario em outro dispositivo
 
@@ -850,6 +932,8 @@ Esses registros armazenam:
 - `display_name`
 - hash de senha com PBKDF2 SHA-256
 - datas de criacao e atualizacao
+- `plan`, `subscription_status`, `stripe_customer_id` e `stripe_subscription_id` (billing)
+- cota mensal de `POST /processar` em `processar_usage` (`user_id` + `YYYY-MM` UTC)
 - `deleted_at` (soft-delete LGPD; contas apagadas saem de `get_user_by_*`)
 - `consent_log` append-only, sem `ON DELETE CASCADE` — sobrevive ao purge
 
@@ -866,6 +950,8 @@ Em producao, os dados de negocio ficam em colecoes MongoDB separadas por `user_i
 - `job_analysis_insights`
 - `development_plans`
 - `generated_files`
+- `processar_usage`
+- `stripe_webhook_events`
 
 Arquivos gerados para download continuam em:
 
@@ -886,3 +972,8 @@ Arquivos gerados para download continuam em:
 - `MONGODB_URI`
 - `MONGODB_DATABASE`
 - `PERSISTENCE_BACKEND`
+- `STRIPE_SECRET_KEY` (pode faltar em teste/local; checkout fica `503`)
+- `STRIPE_PRICE_ESSENCIAL` (Price ID mensal do Essencial R$19,90)
+- `STRIPE_WEBHOOK_SECRET` (pode faltar em teste/local; webhook fica `503`)
+- `STRIPE_CHECKOUT_SUCCESS_URL`
+- `STRIPE_CHECKOUT_CANCEL_URL`
