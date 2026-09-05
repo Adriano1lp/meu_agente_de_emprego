@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS consent_log (
     doc TEXT NOT NULL,
     version TEXT NOT NULL,
     accepted_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users (user_id),
     CHECK (doc IN ('terms', 'privacy'))
 );
 

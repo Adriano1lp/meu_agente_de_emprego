@@ -776,6 +776,45 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row)
 
 
+_CONSENT_LOG_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS consent_log (
+    consent_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    doc TEXT NOT NULL,
+    version TEXT NOT NULL,
+    accepted_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (user_id),
+    CHECK (doc IN ('terms', 'privacy'))
+)
+"""
+
+
+def _ensure_consent_log_table(connection: sqlite3.Connection) -> None:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'consent_log'",
+    ).fetchone()
+    if row is None:
+        connection.execute(_CONSENT_LOG_CREATE_SQL)
+        return
+
+    existing_sql = row["sql"] if isinstance(row, sqlite3.Row) else row[0]
+    if not existing_sql or "CASCADE" not in str(existing_sql).upper():
+        return
+
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute("ALTER TABLE consent_log RENAME TO consent_log_legacy_cascade")
+    connection.execute(_CONSENT_LOG_CREATE_SQL)
+    connection.execute(
+        """
+        INSERT INTO consent_log (consent_id, user_id, doc, version, accepted_at)
+        SELECT consent_id, user_id, doc, version, accepted_at
+        FROM consent_log_legacy_cascade
+        """
+    )
+    connection.execute("DROP TABLE consent_log_legacy_cascade")
+    connection.execute("PRAGMA foreign_keys = ON")
+
+
 def _insert_consent_log(connection: sqlite3.Connection, consent: dict[str, Any]) -> None:
     connection.execute(
         """
@@ -808,19 +847,7 @@ def _ensure_consent_columns(connection: sqlite3.Connection) -> None:
     if "privacy_version" not in columns:
         connection.execute("ALTER TABLE users ADD COLUMN privacy_version TEXT")
 
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS consent_log (
-            consent_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            doc TEXT NOT NULL,
-            version TEXT NOT NULL,
-            accepted_at TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
-            CHECK (doc IN ('terms', 'privacy'))
-        )
-        """
-    )
+    _ensure_consent_log_table(connection)
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_consent_log_user_accepted

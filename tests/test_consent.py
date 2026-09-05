@@ -145,6 +145,57 @@ def test_existing_sqlite_users_table_gains_consent_columns(tmp_path, monkeypatch
     user = _register(email="legacy-migrate@example.com")
     assert user["terms_version"] == CURRENT_TERMS_VERSION
     assert len(list_consent_log(user["user_id"])) == 2
+    with sqlite3.connect(db_path) as connection:
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'consent_log'",
+        ).fetchone()[0]
+    assert "CASCADE" not in table_sql.upper()
+
+
+def test_sqlite_rebuilds_consent_log_without_cascade(tmp_path, monkeypatch):
+    import sqlite3
+
+    db_path = tmp_path / "cascade.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE users (
+                user_id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL
+            );
+            CREATE TABLE consent_log (
+                consent_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                doc TEXT NOT NULL,
+                version TEXT NOT NULL,
+                accepted_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+            );
+            INSERT INTO users (user_id, email, display_name, password_hash)
+            VALUES ('user_keep', 'keep@example.com', 'Keep', 'x');
+            INSERT INTO consent_log (user_id, doc, version, accepted_at)
+            VALUES ('user_keep', 'terms', '1.0', '2026-01-01T00:00:00+00:00');
+            """
+        )
+        connection.commit()
+
+    monkeypatch.setattr("config.DATABASE_PATH", db_path)
+    monkeypatch.setattr("config.PERSISTENCE_BACKEND", "sqlite")
+    monkeypatch.setattr("database.repository.DATABASE_PATH", db_path)
+    monkeypatch.setattr("database.repository.PERSISTENCE_BACKEND", "sqlite")
+    from database.repository import initialize_database
+
+    initialize_database(db_path)
+    rows = list_consent_log("user_keep")
+    assert len(rows) == 1
+    assert rows[0]["doc"] == "terms"
+    with sqlite3.connect(db_path) as connection:
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'consent_log'",
+        ).fetchone()[0]
+    assert "CASCADE" not in table_sql.upper()
 
 
 def test_legal_docs_v1_and_unknown_version():
