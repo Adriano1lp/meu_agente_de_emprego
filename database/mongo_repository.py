@@ -448,6 +448,72 @@ def count_generated_files(user_id: str) -> int:
     return int(_get_collection("generated_files").count_documents({"user_id": user_id}))
 
 
+def get_subscription_by_stripe_id(stripe_subscription_id: str) -> dict[str, Any] | None:
+    document = _get_collection("user_subscriptions").find_one(
+        {"stripe_subscription_id": stripe_subscription_id},
+        {"_id": 0},
+    )
+    return dict(document) if document else None
+
+
+def get_user_subscription(user_id: str) -> dict[str, Any] | None:
+    document = _get_collection("user_subscriptions").find_one(
+        {"user_id": user_id},
+        {"_id": 0},
+    )
+    return dict(document) if document else None
+
+
+def upsert_user_subscription(subscription: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "user_id": subscription["user_id"],
+        "plan": subscription.get("plan") or "free",
+        "status": subscription.get("status") or "active",
+        "stripe_customer_id": subscription.get("stripe_customer_id"),
+        "stripe_subscription_id": subscription.get("stripe_subscription_id"),
+        "stripe_price_id": subscription.get("stripe_price_id"),
+        "current_period_start": subscription.get("current_period_start"),
+        "current_period_end": subscription.get("current_period_end"),
+        "updated_at": subscription.get("updated_at"),
+    }
+    _get_collection("user_subscriptions").update_one(
+        {"user_id": payload["user_id"]},
+        {"$set": payload},
+        upsert=True,
+    )
+    return payload
+
+
+def append_usage_event(event: dict[str, Any]) -> None:
+    _get_collection("usage_ledger").insert_one(
+        {
+            "user_id": event["user_id"],
+            "feature": event["feature"],
+            "units": int(event.get("units") or 1),
+            "period": event["period"],
+            "created_at": event["created_at"],
+        }
+    )
+
+
+def count_usage_units(user_id: str, period: str) -> int:
+    pipeline = [
+        {"$match": {"user_id": user_id, "period": period}},
+        {"$group": {"_id": None, "total": {"$sum": "$units"}}},
+    ]
+    rows = list(_get_collection("usage_ledger").aggregate(pipeline))
+    return int(rows[0]["total"]) if rows else 0
+
+
+def list_usage_events(user_id: str) -> list[dict[str, Any]]:
+    documents = _get_collection("usage_ledger").find(
+        {"user_id": user_id},
+        {"_id": 1, "user_id": 1, "feature": 1, "units": 1, "period": 1, "created_at": 1},
+        sort=[("created_at", 1), ("_id", 1)],
+    )
+    return [_public_mongo_document(document) for document in documents]
+
+
 def collect_user_export_payload(user_id: str) -> dict[str, Any]:
     user = get_user_by_id(user_id)
     if not user:
@@ -497,6 +563,8 @@ def collect_user_export_payload(user_id: str) -> dict[str, Any]:
         ),
         "development_plans": list_development_plans(user_id, limit=1000, offset=0),
         "generated_files": generated_files,
+        "subscription": get_user_subscription(user_id),
+        "usage": list_usage_events(user_id),
     }
 
 
@@ -516,6 +584,8 @@ def anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
         "user_profile_versions",
         "user_profiles",
         "password_reset_tokens",
+        "usage_ledger",
+        "user_subscriptions",
     ):
         _get_collection(collection_name).delete_many({"user_id": user_id})
 
@@ -600,6 +670,10 @@ def _ensure_indexes(database: Any) -> None:
         unique=True,
     )
     database.generated_files.create_index([("user_id", 1), ("created_at", -1)])
+    database.user_subscriptions.create_index("user_id", unique=True)
+    database.user_subscriptions.create_index("stripe_subscription_id")
+    database.user_subscriptions.create_index("stripe_customer_id")
+    database.usage_ledger.create_index([("user_id", 1), ("period", 1)])
     _indexes_ready = True
 
 

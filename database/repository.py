@@ -26,6 +26,7 @@ def initialize_database(database_path: Path | None = None) -> Path:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(schema)
         _ensure_legal_schema(connection)
+        _ensure_billing_schema(connection)
         connection.commit()
 
     return database_path
@@ -244,6 +245,43 @@ def collect_user_export_payload(user_id: str) -> dict[str, Any]:
     if _use_mongodb():
         return mongo_repository.collect_user_export_payload(user_id)
     return _sqlite_collect_user_export_payload(user_id)
+
+
+def get_user_subscription(user_id: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_user_subscription(user_id)
+    return _sqlite_get_user_subscription(user_id)
+
+
+def upsert_user_subscription(subscription: dict[str, Any]) -> dict[str, Any]:
+    if _use_mongodb():
+        return mongo_repository.upsert_user_subscription(subscription)
+    return _sqlite_upsert_user_subscription(subscription)
+
+
+def get_subscription_by_stripe_id(stripe_subscription_id: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_subscription_by_stripe_id(stripe_subscription_id)
+    return _sqlite_get_subscription_by_stripe_id(stripe_subscription_id)
+
+
+def append_usage_event(event: dict[str, Any]) -> None:
+    if _use_mongodb():
+        mongo_repository.append_usage_event(event)
+        return
+    _sqlite_append_usage_event(event)
+
+
+def count_usage_units(user_id: str, period: str) -> int:
+    if _use_mongodb():
+        return mongo_repository.count_usage_units(user_id, period)
+    return _sqlite_count_usage_units(user_id, period)
+
+
+def list_usage_events(user_id: str) -> list[dict[str, Any]]:
+    if _use_mongodb():
+        return mongo_repository.list_usage_events(user_id)
+    return _sqlite_list_usage(user_id)
 
 
 def anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
@@ -979,6 +1017,8 @@ def _sqlite_collect_user_export_payload(user_id: str) -> dict[str, Any]:
         ),
         "development_plans": list_development_plans(user_id, limit=1000, offset=0),
         "generated_files": [dict(row) for row in file_rows],
+        "subscription": _sqlite_get_user_subscription(user_id),
+        "usage": _sqlite_list_usage(user_id),
     }
 
 
@@ -1001,6 +1041,8 @@ def _sqlite_anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
             "user_profile_versions",
             "user_profiles",
             "password_reset_tokens",
+            "usage_ledger",
+            "user_subscriptions",
         ):
             connection.execute(
                 f"DELETE FROM {table_name} WHERE user_id = ?",
@@ -1045,6 +1087,156 @@ def _json_load_or_none(value: str | None) -> Any:
     if not value:
         return None
     return json.loads(value)
+
+
+def _ensure_billing_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_subscriptions (
+            user_id TEXT PRIMARY KEY,
+            plan TEXT NOT NULL DEFAULT 'free',
+            status TEXT NOT NULL DEFAULT 'active',
+            stripe_customer_id TEXT,
+            stripe_subscription_id TEXT,
+            stripe_price_id TEXT,
+            current_period_start TEXT,
+            current_period_end TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_ledger (
+            usage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            feature TEXT NOT NULL,
+            units INTEGER NOT NULL DEFAULT 1,
+            period TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_usage_ledger_user_period
+            ON usage_ledger (user_id, period)
+        """
+    )
+
+
+def _sqlite_get_subscription_by_stripe_id(
+    stripe_subscription_id: str,
+) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT user_id, plan, status, stripe_customer_id, stripe_subscription_id,
+                stripe_price_id, current_period_start, current_period_end, updated_at
+            FROM user_subscriptions
+            WHERE stripe_subscription_id = ?
+            """,
+            (stripe_subscription_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _sqlite_get_user_subscription(user_id: str) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT user_id, plan, status, stripe_customer_id, stripe_subscription_id,
+                stripe_price_id, current_period_start, current_period_end, updated_at
+            FROM user_subscriptions
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _sqlite_upsert_user_subscription(subscription: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "user_id": subscription["user_id"],
+        "plan": subscription.get("plan") or "free",
+        "status": subscription.get("status") or "active",
+        "stripe_customer_id": subscription.get("stripe_customer_id"),
+        "stripe_subscription_id": subscription.get("stripe_subscription_id"),
+        "stripe_price_id": subscription.get("stripe_price_id"),
+        "current_period_start": subscription.get("current_period_start"),
+        "current_period_end": subscription.get("current_period_end"),
+        "updated_at": subscription.get("updated_at"),
+    }
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO user_subscriptions (
+                user_id, plan, status, stripe_customer_id, stripe_subscription_id,
+                stripe_price_id, current_period_start, current_period_end, updated_at
+            )
+            VALUES (
+                :user_id, :plan, :status, :stripe_customer_id, :stripe_subscription_id,
+                :stripe_price_id, :current_period_start, :current_period_end, :updated_at
+            )
+            ON CONFLICT(user_id) DO UPDATE SET
+                plan = excluded.plan,
+                status = excluded.status,
+                stripe_customer_id = excluded.stripe_customer_id,
+                stripe_subscription_id = excluded.stripe_subscription_id,
+                stripe_price_id = excluded.stripe_price_id,
+                current_period_start = excluded.current_period_start,
+                current_period_end = excluded.current_period_end,
+                updated_at = excluded.updated_at
+            """,
+            payload,
+        )
+    return payload
+
+
+def _sqlite_append_usage_event(event: dict[str, Any]) -> None:
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO usage_ledger (user_id, feature, units, period, created_at)
+            VALUES (:user_id, :feature, :units, :period, :created_at)
+            """,
+            {
+                "user_id": event["user_id"],
+                "feature": event["feature"],
+                "units": int(event.get("units") or 1),
+                "period": event["period"],
+                "created_at": event["created_at"],
+            },
+        )
+
+
+def _sqlite_count_usage_units(user_id: str, period: str) -> int:
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT COALESCE(SUM(units), 0) AS total
+            FROM usage_ledger
+            WHERE user_id = ? AND period = ?
+            """,
+            (user_id, period),
+        ).fetchone()
+    return int(row["total"]) if row else 0
+
+
+def _sqlite_list_usage(user_id: str) -> list[dict[str, Any]]:
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT usage_id, user_id, feature, units, period, created_at
+            FROM usage_ledger
+            WHERE user_id = ?
+            ORDER BY created_at ASC, usage_id ASC
+            """,
+            (user_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _json_or_none(value: Any) -> str | None:
