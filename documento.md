@@ -264,6 +264,64 @@ curl \
 }
 ```
 
+### `GET /users/me/export`
+
+Exportacao LGPD dos dados do usuario autenticado. Resposta sincrona em JSON
+(sem ZIP e sem binarios). O pacote nunca inclui senha, `password_hash` nem JWT.
+
+Conteudo:
+
+- conta: `email`, `display_name`, `terms_*`, `privacy_*`, `created_at`
+- perfil estruturado, se existir
+- historico de processamentos / candidaturas (`processing_runs`, insights, PDIs)
+- metadados de arquivos (nome, tipo, `created_at`)
+
+A rota usa o mesmo gate de consentimento da Fatia 1: `401` sem auth e `403`
+com `TERMS_OUTDATED` ou `PRIVACY_OUTDATED`.
+
+```bash
+curl \
+  -H "Authorization: Bearer <jwt>" \
+  http://localhost:8000/users/me/export
+```
+
+### `DELETE /users/me`
+
+Exclusao da conta (direito de eliminacao / purge). Exige autenticacao e o body
+exato `{ "confirm": "DELETE" }`. Sem `confirm`, ou com texto diferente, a API
+responde `400`.
+
+Efeito:
+
+- soft-delete com `deleted_at`
+- scrub de PII: email vira `deleted+{user_id}@invalid.local`, nome vira
+  `Conta excluida`, `password_hash` e invalidado
+- apaga perfil, documentos, processamentos, embeddings, arquivos gerados e
+  tokens de reset ligados ao `user_id`
+- remove `storage/users/{user_id}/` (curriculo, chroma, PDFs)
+- `consent_log` permanece append-only (doc, version, accepted_at, user_id)
+- login com o email original falha (`401`); o email fica livre para um novo cadastro
+  (o `user_id` da conta apagada permanece no stub; o recadastro recebe um id novo)
+- rotas autenticadas do usuario passam a responder `401`
+
+```bash
+curl -X DELETE \
+  -H "Authorization: Bearer <jwt>" \
+  -H "Content-Type: application/json" \
+  -d "{\"confirm\":\"DELETE\"}" \
+  http://localhost:8000/users/me
+```
+
+Resposta esperada:
+
+```json
+{
+  "user_id": "user_123abc456def",
+  "deleted": true,
+  "deleted_at": "2026-09-05T12:00:00+00:00"
+}
+```
+
 ## 6. Upload de curriculo
 
 ### `POST /users/me/upload-cv`
@@ -792,6 +850,8 @@ Esses registros armazenam:
 - `display_name`
 - hash de senha com PBKDF2 SHA-256
 - datas de criacao e atualizacao
+- `deleted_at` (soft-delete LGPD; contas apagadas saem de `get_user_by_*`)
+- `consent_log` append-only, sem `ON DELETE CASCADE` — sobrevive ao purge
 
 ### Dados do usuario
 

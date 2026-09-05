@@ -14,7 +14,10 @@ os.environ["MONGODB_URI"] = ""
 @pytest.fixture
 def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     db_path = tmp_path / "app.db"
+    users_dir = tmp_path / "users"
+    users_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr("config.DATABASE_PATH", db_path)
+    monkeypatch.setattr("config.USERS_DIR", users_dir)
     monkeypatch.setattr("config.PERSISTENCE_BACKEND", "sqlite")
     monkeypatch.setattr("database.repository.DATABASE_PATH", db_path)
     monkeypatch.setattr("database.repository.PERSISTENCE_BACKEND", "sqlite")
