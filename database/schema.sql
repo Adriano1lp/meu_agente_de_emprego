@@ -13,12 +13,35 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     terms_accepted INTEGER NOT NULL DEFAULT 0,
     terms_accepted_at TEXT,
+    terms_version TEXT,
+    privacy_accepted INTEGER NOT NULL DEFAULT 0,
+    privacy_accepted_at TEXT,
+    privacy_version TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     deleted_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
+
+CREATE TABLE IF NOT EXISTS consent_log (
+    consent_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    document_type TEXT NOT NULL,
+    document_version TEXT NOT NULL,
+    accepted INTEGER NOT NULL DEFAULT 1,
+    accepted_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    ip_address TEXT,
+    user_agent TEXT,
+    FOREIGN KEY (user_id) REFERENCES users (user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_consent_log_user_id
+    ON consent_log (user_id, accepted_at);
+
+CREATE INDEX IF NOT EXISTS idx_consent_log_document
+    ON consent_log (document_type, document_version);
 
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
     reset_token_id INTEGER PRIMARY KEY AUTOINCREMENT,

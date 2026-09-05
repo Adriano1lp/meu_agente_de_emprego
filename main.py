@@ -44,6 +44,7 @@ from services.auth_users import (
     request_password_reset,
     user_can_access_terms_protected_routes,
 )
+from services.legal import current_legal_documents
 from services.development_plan import (
     DEFAULT_ANALYSIS_LIMIT,
     MAX_ANALYSIS_LIMIT,
@@ -170,6 +171,7 @@ class AuthRegisterRequest(BaseModel):
     email: str
     password: str
     terms_accepted: bool = False
+    privacy_accepted: bool = False
 
 
 class AuthLoginRequest(BaseModel):
@@ -188,6 +190,7 @@ class PasswordResetConfirmRequest(BaseModel):
 
 class TermsAcceptanceRequest(BaseModel):
     accepted: bool
+    privacy_accepted: bool | None = None
 
 
 def _read_authorization_header(
@@ -226,13 +229,21 @@ def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/legal")
+def read_current_legal_documents() -> dict[str, Any]:
+    return current_legal_documents()
+
+
 @app.post("/auth/register")
-def auth_register(payload: AuthRegisterRequest) -> dict[str, Any]:
+def auth_register(payload: AuthRegisterRequest, request: Request) -> dict[str, Any]:
     user = register_user(
         display_name=payload.display_name,
         email=payload.email,
         password=payload.password,
         terms_accepted=payload.terms_accepted,
+        privacy_accepted=payload.privacy_accepted,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
     )
     token = create_access_token(
         user_id=user["user_id"],
@@ -293,6 +304,11 @@ def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict[str, A
         "auth_mode": AUTH_MODE,
         "terms_accepted": bool(user.get("terms_accepted")) if user else False,
         "terms_accepted_at": user.get("terms_accepted_at") if user else None,
+        "terms_version": user.get("terms_version") if user else None,
+        "privacy_accepted": bool(user.get("privacy_accepted")) if user else False,
+        "privacy_accepted_at": user.get("privacy_accepted_at") if user else None,
+        "privacy_version": user.get("privacy_version") if user else None,
+        "needs_reconsent": bool(user.get("needs_reconsent")) if user else True,
     }
     if user:
         response["email"] = user["email"]
@@ -303,11 +319,21 @@ def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict[str, A
 @app.post("/users/me/terms/accept")
 def accept_current_user_terms(
     payload: TermsAcceptanceRequest,
+    request: Request,
     user_id: str = Depends(get_current_user_id),
 ) -> dict[str, Any]:
     if not payload.accepted:
         raise HTTPException(status_code=400, detail="Aceite do termo de uso obrigatorio")
-    return accept_terms_for_user(user_id)
+    if payload.privacy_accepted is False:
+        raise HTTPException(
+            status_code=400,
+            detail="Aceite da politica de privacidade obrigatorio",
+        )
+    return accept_terms_for_user(
+        user_id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
 
 
 @app.post("/users/me/upload-cv")

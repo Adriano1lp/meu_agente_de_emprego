@@ -14,10 +14,12 @@ from config import (
     ENVIRONMENT,
     PASSWORD_RESET_EXPIRATION_MINUTES,
     PASSWORD_RESET_EXPOSE_TOKEN,
+    PRIVACY_POLICY_VERSION,
+    TERMS_OF_SERVICE_VERSION,
     sanitize_user_id,
 )
 from database.repository import (
-    accept_user_terms,
+    accept_user_legal_documents,
     create_password_reset_token,
     create_user,
     get_password_reset_token_by_hash,
@@ -25,6 +27,11 @@ from database.repository import (
     get_user_by_id as find_user_by_id,
     mark_password_reset_token_used,
     update_user_password_hash,
+)
+from services.legal import (
+    record_current_legal_acceptance,
+    require_signup_legal_acceptance,
+    user_needs_reconsent,
 )
 
 PBKDF2_ITERATIONS = 200_000
@@ -39,6 +46,9 @@ def register_user(
     email: str,
     password: str,
     terms_accepted: bool,
+    privacy_accepted: bool = False,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> dict[str, Any]:
     normalized_email = _normalize_email(email)
     display_name = display_name.strip()
@@ -46,8 +56,10 @@ def register_user(
         raise HTTPException(status_code=400, detail="Nome obrigatorio")
 
     _validate_password(password)
-    if not terms_accepted:
-        raise HTTPException(status_code=400, detail="Aceite do termo de uso obrigatorio")
+    require_signup_legal_acceptance(
+        terms_accepted=terms_accepted,
+        privacy_accepted=privacy_accepted,
+    )
 
     if get_user_by_email(normalized_email):
         raise HTTPException(status_code=409, detail="Email ja cadastrado")
@@ -61,6 +73,10 @@ def register_user(
         "password_hash": _hash_password(password),
         "terms_accepted": True,
         "terms_accepted_at": now,
+        "terms_version": TERMS_OF_SERVICE_VERSION,
+        "privacy_accepted": True,
+        "privacy_accepted_at": now,
+        "privacy_version": PRIVACY_POLICY_VERSION,
         "created_at": now,
         "updated_at": now,
     }
@@ -71,6 +87,13 @@ def register_user(
             raise HTTPException(status_code=409, detail="Email ja cadastrado") from exc
         raise
 
+    record_current_legal_acceptance(
+        user_id=user_id,
+        source="register",
+        accepted_at=now,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
     return _public_user(user)
 
 
@@ -158,12 +181,34 @@ def user_can_access_terms_protected_routes(user_id: str) -> bool | None:
         return None
     if user.get("password_hash") == "legacy_external_auth":
         return True
-    return bool(user.get("terms_accepted"))
+    if not user.get("terms_accepted"):
+        return False
+    if user.get("terms_version") and not user.get("privacy_accepted"):
+        return False
+    return True
 
 
-def accept_terms_for_user(user_id: str) -> dict[str, Any]:
+def accept_terms_for_user(
+    user_id: str,
+    *,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> dict[str, Any]:
     safe_user_id = sanitize_user_id(user_id)
-    user = accept_user_terms(safe_user_id, _utc_now_iso())
+    now = _utc_now_iso()
+    versions = record_current_legal_acceptance(
+        user_id=safe_user_id,
+        source="accept",
+        accepted_at=now,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    user = accept_user_legal_documents(
+        safe_user_id,
+        accepted_at=now,
+        terms_version=versions["terms_version"],
+        privacy_version=versions["privacy_version"],
+    )
     if not user:
         raise HTTPException(status_code=404, detail="Usuario nao encontrado")
     return _public_user(user)
@@ -242,6 +287,11 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
         "display_name": user["display_name"],
         "terms_accepted": bool(user.get("terms_accepted")),
         "terms_accepted_at": user.get("terms_accepted_at"),
+        "terms_version": user.get("terms_version"),
+        "privacy_accepted": bool(user.get("privacy_accepted")),
+        "privacy_accepted_at": user.get("privacy_accepted_at"),
+        "privacy_version": user.get("privacy_version"),
+        "needs_reconsent": user_needs_reconsent(user),
         "created_at": user.get("created_at"),
         "updated_at": user.get("updated_at"),
     }

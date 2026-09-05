@@ -45,6 +45,8 @@ Para esse cenario, a maior preocupacao nao e escala de CPU e sim:
 - `MAX_UPLOAD_SIZE_MB`
 - `OPENAI_CHAT_MODEL`
 - `OPENAI_EMBEDDING_MODEL`
+- `TERMS_OF_SERVICE_VERSION`
+- `PRIVACY_POLICY_VERSION`
 
 ## Exemplo de configuracao para Render
 
@@ -197,7 +199,7 @@ curl https://sua-api.onrender.com/health
 ```bash
 curl -X POST \
   -H "Content-Type: application/json" \
-  -d "{\"display_name\":\"Teste\",\"email\":\"teste@example.com\",\"password\":\"senha-forte-123\"}" \
+  -d "{\"display_name\":\"Teste\",\"email\":\"teste@example.com\",\"password\":\"senha-forte-123\",\"terms_accepted\":true,\"privacy_accepted\":true}" \
   https://sua-api.onrender.com/auth/register
 ```
 

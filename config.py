@@ -57,6 +57,11 @@ CORS_ALLOW_ORIGINS = [
 AUTH_DIR = STORAGE_DIR / "auth"
 AUTH_USERS_FILE = AUTH_DIR / "users.json"
 
+TERMS_OF_SERVICE_VERSION = os.getenv("TERMS_OF_SERVICE_VERSION", "tos_v1").strip() or "tos_v1"
+PRIVACY_POLICY_VERSION = os.getenv("PRIVACY_POLICY_VERSION", "privacy_v1").strip() or "privacy_v1"
+LEGAL_DOCUMENT_TERMS = "terms_of_service"
+LEGAL_DOCUMENT_PRIVACY = "privacy_policy"
+
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 USERS_DIR.mkdir(parents=True, exist_ok=True)
