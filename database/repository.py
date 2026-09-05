@@ -155,6 +155,18 @@ def is_deleted_user(user_id: str) -> bool:
         return row is not None
 
 
+def user_id_exists(user_id: str) -> bool:
+    if _use_mongodb():
+        return mongo_repository.user_id_exists(user_id)
+
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return row is not None
+
+
 def accept_user_terms(user_id: str, accepted_at: str, *, version: str | None = None) -> dict[str, Any] | None:
     return update_user_consent(
         user_id,

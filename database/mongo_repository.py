@@ -80,6 +80,14 @@ def is_deleted_user(user_id: str) -> bool:
     return user is not None
 
 
+def user_id_exists(user_id: str) -> bool:
+    user = _get_collection("users").find_one(
+        {"user_id": user_id},
+        {"_id": 1},
+    )
+    return user is not None
+
+
 def accept_user_terms(user_id: str, accepted_at: str, *, version: str | None = None) -> dict[str, Any] | None:
     return update_user_consent(
         user_id,

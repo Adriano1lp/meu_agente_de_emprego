@@ -28,6 +28,7 @@ from database.repository import (
     mark_password_reset_token_used,
     update_user_consent,
     update_user_password_hash,
+    user_id_exists,
 )
 from services.legal import current_version_for
 
@@ -319,7 +320,10 @@ def _validate_password(password: str) -> None:
 
 def _build_user_id(email: str) -> str:
     digest = hashlib.sha256(email.encode("utf-8")).hexdigest()[:12]
-    return sanitize_user_id(f"user_{digest}")
+    candidate = sanitize_user_id(f"user_{digest}")
+    if not user_id_exists(candidate):
+        return candidate
+    return sanitize_user_id(f"user_{digest}_{secrets.token_hex(4)}")
 
 
 def _hash_password(password: str) -> str:
