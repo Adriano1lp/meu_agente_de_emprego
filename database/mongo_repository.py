@@ -448,6 +448,100 @@ def count_generated_files(user_id: str) -> int:
     return int(_get_collection("generated_files").count_documents({"user_id": user_id}))
 
 
+def collect_user_export_payload(user_id: str) -> dict[str, Any]:
+    user = get_user_by_id(user_id)
+    if not user:
+        return {}
+
+    user.pop("password_hash", None)
+    profile = get_user_profile(user_id)
+    documents = [
+        _public_mongo_document(document)
+        for document in _get_collection("user_documents").find(
+            {"user_id": user_id},
+            sort=[("created_at", 1)],
+        )
+    ]
+    processing_runs = [
+        _public_mongo_document(document)
+        for document in _get_collection("processing_runs").find(
+            {"user_id": user_id},
+            sort=[("created_at", 1)],
+        )
+    ]
+    generated_files = [
+        _public_mongo_document(document)
+        for document in _get_collection("generated_files").find(
+            {"user_id": user_id},
+            sort=[("created_at", 1)],
+        )
+    ]
+    profile_versions = [
+        _public_mongo_document(document)
+        for document in _get_collection("user_profile_versions").find(
+            {"user_id": user_id},
+            sort=[("version", 1)],
+        )
+    ]
+    return {
+        "user": user,
+        "consent_log": list_consent_log(user_id),
+        "profile": profile,
+        "profile_versions": profile_versions,
+        "documents": documents,
+        "processing_runs": processing_runs,
+        "job_analysis_insights": list_job_analysis_insights(
+            user_id,
+            limit=1000,
+            offset=0,
+        ),
+        "development_plans": list_development_plans(user_id, limit=1000, offset=0),
+        "generated_files": generated_files,
+    }
+
+
+def anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
+    users = _get_collection("users")
+    if not users.find_one({"user_id": user_id, "deleted_at": None}, {"_id": 1}):
+        return False
+
+    for collection_name in (
+        "generated_files",
+        "job_analysis_insights",
+        "development_plans",
+        "processing_runs",
+        "embedding_runs",
+        "embedding_chunks",
+        "user_documents",
+        "user_profile_versions",
+        "user_profiles",
+        "password_reset_tokens",
+    ):
+        _get_collection(collection_name).delete_many({"user_id": user_id})
+
+    users.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "email": f"deleted_{user_id}@deleted.invalid",
+                "display_name": "Conta excluida",
+                "password_hash": "deleted_account",
+                "updated_at": deleted_at,
+                "deleted_at": deleted_at,
+            },
+        },
+    )
+    return True
+
+
+def _public_mongo_document(document: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(document)
+    if "_id" in payload:
+        payload["id"] = str(payload.pop("_id"))
+    payload.pop("password_hash", None)
+    return payload
+
+
 def _get_collection(name: str) -> Any:
     database = initialize_database()
     return database[name]
