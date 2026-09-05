@@ -62,6 +62,17 @@ PRIVACY_POLICY_VERSION = os.getenv("PRIVACY_POLICY_VERSION", "privacy_v1").strip
 LEGAL_DOCUMENT_TERMS = "terms_of_service"
 LEGAL_DOCUMENT_PRIVACY = "privacy_policy"
 
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+STRIPE_PRICE_ESSENCIAL = os.getenv("STRIPE_PRICE_ESSENCIAL", "").strip()
+STRIPE_SUCCESS_URL = os.getenv("STRIPE_SUCCESS_URL", "").strip()
+STRIPE_CANCEL_URL = os.getenv("STRIPE_CANCEL_URL", "").strip()
+PLAN_FREE = "free"
+PLAN_ESSENCIAL = "essencial"
+FREE_LLM_QUOTA_MONTHLY = int(os.getenv("FREE_LLM_QUOTA_MONTHLY", "5"))
+ESSENCIAL_LLM_QUOTA_MONTHLY = int(os.getenv("ESSENCIAL_LLM_QUOTA_MONTHLY", "100"))
+STRIPE_WEBHOOK_TOLERANCE_SECONDS = int(os.getenv("STRIPE_WEBHOOK_TOLERANCE_SECONDS", "300"))
+
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 USERS_DIR.mkdir(parents=True, exist_ok=True)

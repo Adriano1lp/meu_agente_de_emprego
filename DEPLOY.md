@@ -47,6 +47,13 @@ Para esse cenario, a maior preocupacao nao e escala de CPU e sim:
 - `OPENAI_EMBEDDING_MODEL`
 - `TERMS_OF_SERVICE_VERSION`
 - `PRIVACY_POLICY_VERSION`
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- `STRIPE_PRICE_ESSENCIAL`
+- `STRIPE_SUCCESS_URL`
+- `STRIPE_CANCEL_URL`
+- `FREE_LLM_QUOTA_MONTHLY`
+- `ESSENCIAL_LLM_QUOTA_MONTHLY`
 
 ## Exemplo de configuracao para Render
 
@@ -65,6 +72,15 @@ MONGODB_DATABASE=analista_de_vagas
 MAX_UPLOAD_SIZE_MB=10
 OPENAI_CHAT_MODEL=gpt-4o
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+TERMS_OF_SERVICE_VERSION=tos_v1
+PRIVACY_POLICY_VERSION=privacy_v1
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_ESSENCIAL=price_...
+STRIPE_SUCCESS_URL=https://seu-app.onrender.com/?billing=success
+STRIPE_CANCEL_URL=https://seu-app.onrender.com/?billing=cancel
+FREE_LLM_QUOTA_MONTHLY=5
+ESSENCIAL_LLM_QUOTA_MONTHLY=100
 ```
 
 ## Validacoes de seguranca no startup
@@ -186,7 +202,9 @@ Depois do deploy:
 8. `POST /processar`
 9. `GET /users/me/files/{nome_do_arquivo}`
 10. `GET /users/me/export`
-11. `DELETE /users/me` (somente em conta de teste)
+11. `GET /billing/me`
+12. `POST /billing/checkout` (requer Stripe)
+13. `DELETE /users/me` (somente em conta de teste)
 
 ## Exemplos de smoke test
 

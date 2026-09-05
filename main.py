@@ -45,6 +45,12 @@ from services.auth_users import (
     user_can_access_terms_protected_routes,
 )
 from services.account import delete_current_user, export_current_user
+from services.billing import (
+    consume_llm_quota,
+    create_checkout_session,
+    get_entitlement,
+    handle_stripe_webhook,
+)
 from services.legal import current_legal_documents
 from services.development_plan import (
     DEFAULT_ANALYSIS_LIMIT,
@@ -225,6 +231,14 @@ def _require_terms_accepted(user_id: str = Depends(get_current_user_id)) -> str:
     return user_id
 
 
+def require_llm_quota(feature: str):
+    def _dependency(user_id: str = Depends(_require_terms_accepted)) -> str:
+        consume_llm_quota(user_id, feature)
+        return user_id
+
+    return _dependency
+
+
 @app.get("/health")
 def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
@@ -314,6 +328,7 @@ def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict[str, A
     if user:
         response["email"] = user["email"]
         response["display_name"] = user["display_name"]
+        response["billing"] = get_entitlement(user_id)
     return response
 
 
@@ -388,10 +403,30 @@ def read_profile(user_id: str = Depends(_require_terms_accepted)) -> dict[str, A
     }
 
 
+@app.get("/billing/me")
+def read_billing_entitlement(
+    user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    return get_entitlement(user_id)
+
+
+@app.post("/billing/checkout")
+def create_billing_checkout(
+    user_id: str = Depends(_require_terms_accepted),
+) -> dict[str, str]:
+    return create_checkout_session(user_id)
+
+
+@app.post("/billing/webhook")
+async def stripe_billing_webhook(request: Request) -> dict[str, Any]:
+    payload = await request.body()
+    return handle_stripe_webhook(payload, request.headers.get("stripe-signature"))
+
+
 @app.post("/users/me/manual-profile")
 def create_manual_profile(
     profile: ManualProfileRequest,
-    user_id: str = Depends(_require_terms_accepted),
+    user_id: str = Depends(require_llm_quota("manual_profile")),
 ) -> dict[str, Any]:
     summary_or_goal = " ".join(
         value.strip()
@@ -458,7 +493,9 @@ def read_user_status(user_id: str = Depends(get_current_user_id)) -> dict[str, A
 
 
 @app.post("/users/me/rebuild-embeddings")
-def rebuild_embeddings(user_id: str = Depends(_require_terms_accepted)) -> dict[str, Any]:
+def rebuild_embeddings(
+    user_id: str = Depends(require_llm_quota("embeddings")),
+) -> dict[str, Any]:
     return rebuild_vectorstore_for_user(user_id)
 
 
@@ -498,7 +535,7 @@ def read_gap_history(
 @app.post("/users/me/development-plan/generate")
 def generate_user_development_plan(
     payload: DevelopmentPlanGenerateRequest,
-    user_id: str = Depends(_require_terms_accepted),
+    user_id: str = Depends(require_llm_quota("development_plan")),
 ) -> dict[str, Any]:
     return generate_development_plan(
         user_id=user_id,
@@ -554,7 +591,7 @@ def update_user_development_plan_item(
 def processar(
     request_data: RequestData,
     request: Request,
-    user_id: str = Depends(_require_terms_accepted),
+    user_id: str = Depends(require_llm_quota("processar")),
 ) -> dict[str, Any]:
     texto_entrada = request_data.texto.strip()
     if not texto_entrada:
@@ -674,7 +711,7 @@ def processar(
 def generate_user_cover_letter(
     payload: CoverLetterRequest,
     request: Request,
-    user_id: str = Depends(_require_terms_accepted),
+    user_id: str = Depends(require_llm_quota("cover_letter")),
 ) -> dict[str, str]:
     empresa = payload.empresa.strip()
     if not empresa:

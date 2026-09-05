@@ -17,6 +17,11 @@ os.environ["MONGODB_URI"] = ""
 os.environ["OPENAI_API_KEY"] = "test-openai-key-not-used"
 os.environ["TERMS_OF_SERVICE_VERSION"] = "tos_v1"
 os.environ["PRIVACY_POLICY_VERSION"] = "privacy_v1"
+os.environ["FREE_LLM_QUOTA_MONTHLY"] = "2"
+os.environ["ESSENCIAL_LLM_QUOTA_MONTHLY"] = "10"
+os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_test"
+os.environ["STRIPE_SECRET_KEY"] = ""
+os.environ["STRIPE_PRICE_ESSENCIAL"] = ""
 
 API_DIR = Path(__file__).resolve().parents[1]
 if str(API_DIR) not in sys.path:

@@ -257,6 +257,25 @@ Exclui a conta do titular autenticado:
 
 Apos a exclusao, `GET /auth/me` retorna `404` e o login com o email original retorna `401`.
 
+## Billing
+
+Planos: **Free** (cota mensal dura de LLM) e **Essencial** (R$ 19,90/mes, cota maior).
+
+### `GET /billing/me`
+
+Retorna plano, status, cota, uso do periodo (`YYYY-MM`) e ids Stripe quando existirem.
+
+### `POST /billing/checkout`
+
+Cria uma Checkout Session do Stripe para o plano Essencial. Requer `STRIPE_SECRET_KEY` e `STRIPE_PRICE_ESSENCIAL`. Sem config, retorna `503`.
+
+### `POST /billing/webhook`
+
+Webhook do Stripe. Verifica `Stripe-Signature` com `STRIPE_WEBHOOK_SECRET`.
+Eventos tratados: `checkout.session.completed`, `customer.subscription.updated/created`, `customer.subscription.deleted`.
+
+Quando a cota acaba, `POST /processar`, `POST /users/me/cover-letter`, `POST /users/me/development-plan/generate`, `POST /users/me/rebuild-embeddings` e `POST /users/me/manual-profile` respondem `402` com `code=quota_exceeded`.
+
 ### Exemplo
 
 ```bash
@@ -537,6 +556,8 @@ Recebe o texto de uma vaga e tenta:
 - comparar com o contexto do candidato
 - gerar uma resposta explicativa
 - gerar um PDF de curriculo otimizado
+
+A cota mensal de LLM e cobrada no servidor. Sem saldo, a API responde `402` com `code=quota_exceeded` antes de chamar o modelo.
 
 ### Exemplo
 

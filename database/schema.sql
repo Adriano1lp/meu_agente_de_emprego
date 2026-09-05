@@ -220,5 +220,31 @@ CREATE TABLE IF NOT EXISTS generated_files (
 CREATE INDEX IF NOT EXISTS idx_generated_files_user_id
     ON generated_files (user_id);
 
+CREATE TABLE IF NOT EXISTS user_subscriptions (
+    user_id TEXT PRIMARY KEY,
+    plan TEXT NOT NULL DEFAULT 'free',
+    status TEXT NOT NULL DEFAULT 'active',
+    stripe_customer_id TEXT,
+    stripe_subscription_id TEXT,
+    stripe_price_id TEXT,
+    current_period_start TEXT,
+    current_period_end TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (user_id)
+);
+
+CREATE TABLE IF NOT EXISTS usage_ledger (
+    usage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    feature TEXT NOT NULL,
+    units INTEGER NOT NULL DEFAULT 1,
+    period TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_ledger_user_period
+    ON usage_ledger (user_id, period);
+
 INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (1, 'initial_sqlite_schema');
