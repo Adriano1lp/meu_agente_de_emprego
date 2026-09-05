@@ -194,7 +194,7 @@ def test_export_blocks_outdated_consent(isolated_db):
 
 def test_delete_requires_auth(isolated_db):
     client = _client()
-    response = client.delete("/users/me", json={"confirm": "DELETE"})
+    response = client.request("DELETE", "/users/me", json={"confirm": "DELETE"})
     assert response.status_code == 401
 
 
@@ -202,13 +202,14 @@ def test_delete_requires_exact_confirm(isolated_db):
     client = _client()
     session = _register(client, "confirm.lgpd@example.com")
 
-    missing = client.delete("/users/me", headers=session["auth"])
+    missing = client.request("DELETE", "/users/me", headers=session["auth"])
     assert missing.status_code == 400
 
-    empty = client.delete("/users/me", headers=session["auth"], json={})
+    empty = client.request("DELETE", "/users/me", headers=session["auth"], json={})
     assert empty.status_code == 400
 
-    wrong = client.delete(
+    wrong = client.request(
+        "DELETE",
         "/users/me",
         headers=session["auth"],
         json={"confirm": "delete"},
@@ -249,7 +250,8 @@ def test_delete_scrubs_user_keeps_consent_and_blocks_login(isolated_db):
         },
     )
 
-    response = client.delete(
+    response = client.request(
+        "DELETE",
         "/users/me",
         headers=session["auth"],
         json={"confirm": "DELETE"},
