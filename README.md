@@ -72,6 +72,22 @@ Fluxo do app:
 - `GET /users/me/export` — JSON com os dados do usuario autenticado
 - `DELETE /users/me` — anonimiza a conta (`deleted_at`), apaga registros relacionados e remove arquivos em `storage/users/{user_id}/`
 
+### Object storage (PDFs e uploads)
+
+Em producao no Render o disco e efemero. Use S3-compativel (AWS S3 ou Cloudflare R2):
+
+- `OBJECT_STORAGE_BACKEND=s3`
+- `S3_BUCKET`
+- `S3_ACCESS_KEY_ID`
+- `S3_SECRET_ACCESS_KEY`
+- `S3_REGION` (`auto` no R2)
+- `S3_ENDPOINT_URL` (R2: `https://<accountid>.r2.cloudflarestorage.com`)
+- `S3_SIGNED_URL_EXPIRES` (padrao 3600s)
+
+Em dev, `OBJECT_STORAGE_BACKEND=local` grava em `STORAGE_DIR` (fallback).
+
+PDFs gerados e uploads de CV vao para `users/{user_id}/...`. O download autenticado em `GET /users/me/files/{nome}` devolve o arquivo local ou redireciona para uma URL assinada.
+
 ### Reset de senha
 
 `POST /auth/password-reset/request` ainda nao envia email real. Em nao-producao o token pode ser devolvido na resposta (`PASSWORD_RESET_EXPOSE_TOKEN`). Envio por email fica para depois.

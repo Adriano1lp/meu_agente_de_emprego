@@ -54,6 +54,13 @@ Para esse cenario, a maior preocupacao nao e escala de CPU e sim:
 - `STRIPE_CANCEL_URL`
 - `FREE_LLM_QUOTA_MONTHLY`
 - `ESSENCIAL_LLM_QUOTA_MONTHLY`
+- `OBJECT_STORAGE_BACKEND`
+- `S3_ENDPOINT_URL`
+- `S3_ACCESS_KEY_ID`
+- `S3_SECRET_ACCESS_KEY`
+- `S3_BUCKET`
+- `S3_REGION`
+- `S3_SIGNED_URL_EXPIRES`
 
 ## Exemplo de configuracao para Render
 
@@ -81,6 +88,13 @@ STRIPE_SUCCESS_URL=https://seu-app.onrender.com/?billing=success
 STRIPE_CANCEL_URL=https://seu-app.onrender.com/?billing=cancel
 FREE_LLM_QUOTA_MONTHLY=5
 ESSENCIAL_LLM_QUOTA_MONTHLY=100
+OBJECT_STORAGE_BACKEND=s3
+S3_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
+S3_ACCESS_KEY_ID=
+S3_SECRET_ACCESS_KEY=
+S3_BUCKET=meu-agente-de-emprego
+S3_REGION=auto
+S3_SIGNED_URL_EXPIRES=3600
 ```
 
 ## Validacoes de seguranca no startup
@@ -133,11 +147,11 @@ Atencao: o filesystem do Render pode ser efemero. A API agora deve usar MongoDB 
 - embeddings e chunks de contexto
 - registros de processamento
 
-Os PDFs gerados ainda sao arquivos locais em `storage/users/{user_id}/outputs/`. Se precisar manter downloads depois de redeploy/restart, configure disco persistente ou mova os PDFs para storage externo.
+PDFs gerados e uploads devem usar object storage S3-compativel (`OBJECT_STORAGE_BACKEND=s3`) para nao depender do disco efemero do Render. Em desenvolvimento o backend `local` continua gravando em `STORAGE_DIR`.
 
-Sem MongoDB, voce ainda pode perder:
+Sem object storage remoto, voce ainda pode perder:
 
-- PDFs gerados
+- PDFs gerados apos restart/redeploy
 
 ## 5. Dominio publico
 
@@ -186,7 +200,7 @@ Antes de publicar:
 3. Confirmar que `CORS_ALLOW_ORIGINS` nao esta com `*`
 4. Confirmar que `OPENAI_API_KEY` esta configurada
 5. Confirmar que `PUBLIC_BASE_URL` aponta para a URL real da API
-6. Confirmar que `STORAGE_DIR` esta em local persistente ou aceitar conscientemente o risco
+6. Confirmar que `OBJECT_STORAGE_BACKEND=s3` (ou disco persistente) para PDFs sobreviverem a redeploy
 
 ## Checklist de smoke test
 

@@ -73,6 +73,14 @@ FREE_LLM_QUOTA_MONTHLY = int(os.getenv("FREE_LLM_QUOTA_MONTHLY", "5"))
 ESSENCIAL_LLM_QUOTA_MONTHLY = int(os.getenv("ESSENCIAL_LLM_QUOTA_MONTHLY", "100"))
 STRIPE_WEBHOOK_TOLERANCE_SECONDS = int(os.getenv("STRIPE_WEBHOOK_TOLERANCE_SECONDS", "300"))
 
+OBJECT_STORAGE_BACKEND = os.getenv("OBJECT_STORAGE_BACKEND", "local").strip().lower() or "local"
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "").strip()
+S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
+S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
+S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
+S3_REGION = os.getenv("S3_REGION", "auto").strip() or "auto"
+S3_SIGNED_URL_EXPIRES = int(os.getenv("S3_SIGNED_URL_EXPIRES", "3600"))
+
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 USERS_DIR.mkdir(parents=True, exist_ok=True)

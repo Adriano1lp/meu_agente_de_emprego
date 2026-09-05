@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from config import USERS_DIR, sanitize_user_id
 from database.repository import anonymize_and_purge_user, collect_user_export_payload
 from services.auth_users import get_user_by_id
+from services.object_storage import delete_prefix
 
 
 def export_current_user(user_id: str) -> dict[str, Any]:
@@ -45,6 +46,7 @@ def delete_current_user(user_id: str) -> dict[str, Any]:
 
 
 def _purge_user_files(user_id: str) -> None:
+    delete_prefix(f"users/{user_id}")
     user_dir = USERS_DIR / user_id
     if user_dir.exists():
         shutil.rmtree(user_dir, ignore_errors=True)

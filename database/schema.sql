@@ -209,6 +209,7 @@ CREATE TABLE IF NOT EXISTS generated_files (
     processing_run_id INTEGER,
     file_name TEXT NOT NULL,
     file_path TEXT NOT NULL,
+    object_key TEXT,
     public_url TEXT,
     media_type TEXT NOT NULL DEFAULT 'application/pdf',
     bytes_size INTEGER,
