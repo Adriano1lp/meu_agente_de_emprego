@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from auth import create_access_token, decode_access_token, get_current_user_id
@@ -36,14 +36,16 @@ from services.main_carta import gerar_pdf_carta_apresentacao
 from services.main_curriculo import gerar_pdf_profissional
 from services.main_rag import rebuild_vectorstore_for_user
 from services.auth_users import (
+    accept_consent_for_user,
     accept_terms_for_user,
     authenticate_user,
     confirm_password_reset,
+    get_outdated_consent_code,
     get_user_by_id,
     register_user,
     request_password_reset,
-    user_can_access_terms_protected_routes,
 )
+from services.legal import get_legal_markdown
 from services.development_plan import (
     DEFAULT_ANALYSIS_LIMIT,
     MAX_ANALYSIS_LIMIT,
@@ -169,7 +171,10 @@ class AuthRegisterRequest(BaseModel):
     display_name: str
     email: str
     password: str
-    terms_accepted: bool = False
+    terms_accepted: bool | None = None
+    terms_version: str | None = None
+    privacy_accepted: bool | None = None
+    privacy_version: str | None = None
 
 
 class AuthLoginRequest(BaseModel):
@@ -188,6 +193,11 @@ class PasswordResetConfirmRequest(BaseModel):
 
 class TermsAcceptanceRequest(BaseModel):
     accepted: bool
+
+
+class ConsentRequest(BaseModel):
+    doc: str
+    version: str
 
 
 def _read_authorization_header(
@@ -209,15 +219,28 @@ def _require_authorization_header(
     return token.strip()
 
 
-def _require_terms_accepted(user_id: str = Depends(get_current_user_id)) -> str:
-    can_access = user_can_access_terms_protected_routes(user_id)
-    if can_access is None:
-        return user_id
-    if not can_access:
+def _raise_if_consent_outdated(user_id: str) -> None:
+    code = get_outdated_consent_code(user_id)
+    if code == "TERMS_OUTDATED":
         raise HTTPException(
             status_code=403,
-            detail="Aceite do termo de uso obrigatorio",
+            detail={
+                "code": "TERMS_OUTDATED",
+                "message": "Termos de uso desatualizados. Reaceite a versao vigente.",
+            },
         )
+    if code == "PRIVACY_OUTDATED":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "PRIVACY_OUTDATED",
+                "message": "Politica de privacidade desatualizada. Reaceite a versao vigente.",
+            },
+        )
+
+
+def _require_terms_accepted(user_id: str = Depends(get_current_user_id)) -> str:
+    _raise_if_consent_outdated(user_id)
     return user_id
 
 
@@ -233,6 +256,9 @@ def auth_register(payload: AuthRegisterRequest) -> dict[str, Any]:
         email=payload.email,
         password=payload.password,
         terms_accepted=payload.terms_accepted,
+        terms_version=payload.terms_version,
+        privacy_accepted=payload.privacy_accepted,
+        privacy_version=payload.privacy_version,
     )
     token = create_access_token(
         user_id=user["user_id"],
@@ -282,22 +308,55 @@ def auth_me(authorization: str = Depends(_require_authorization_header)) -> dict
     if not user:
         raise HTTPException(status_code=404, detail="Usuario nao encontrado")
 
+    _raise_if_consent_outdated(user_id)
     return user
 
 
 @app.get("/users/me")
-def get_current_user(user_id: str = Depends(get_current_user_id)) -> dict[str, Any]:
+def get_current_user(user_id: str = Depends(_require_terms_accepted)) -> dict[str, Any]:
     user = get_user_by_id(user_id)
     response = {
         "user_id": user_id,
         "auth_mode": AUTH_MODE,
         "terms_accepted": bool(user.get("terms_accepted")) if user else False,
         "terms_accepted_at": user.get("terms_accepted_at") if user else None,
+        "terms_version": user.get("terms_version") if user else None,
+        "privacy_accepted": bool(user.get("privacy_accepted")) if user else False,
+        "privacy_accepted_at": user.get("privacy_accepted_at") if user else None,
+        "privacy_version": user.get("privacy_version") if user else None,
     }
     if user:
         response["email"] = user["email"]
         response["display_name"] = user["display_name"]
     return response
+
+
+@app.get("/legal/terms")
+def read_legal_terms(version: str = Query(...)) -> PlainTextResponse:
+    return PlainTextResponse(
+        get_legal_markdown("terms", version),
+        media_type="text/markdown; charset=utf-8",
+    )
+
+
+@app.get("/legal/privacy")
+def read_legal_privacy(version: str = Query(...)) -> PlainTextResponse:
+    return PlainTextResponse(
+        get_legal_markdown("privacy", version),
+        media_type="text/markdown; charset=utf-8",
+    )
+
+
+@app.post("/consent")
+def accept_consent(
+    payload: ConsentRequest,
+    user_id: str = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    return accept_consent_for_user(
+        user_id,
+        doc=payload.doc,
+        version=payload.version,
+    )
 
 
 @app.post("/users/me/terms/accept")

@@ -11,6 +11,11 @@ from database import mongo_repository
 
 API_DIR = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = API_DIR / "database" / "schema.sql"
+USER_COLUMNS = """
+    user_id, email, display_name, password_hash, terms_accepted,
+    terms_accepted_at, terms_version, privacy_accepted, privacy_accepted_at,
+    privacy_version, created_at, updated_at
+"""
 
 
 def initialize_database(database_path: Path | None = None) -> Path:
@@ -25,7 +30,7 @@ def initialize_database(database_path: Path | None = None) -> Path:
     with sqlite3.connect(database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(schema)
-        _ensure_terms_columns(connection)
+        _ensure_consent_columns(connection)
         connection.commit()
 
     return database_path
@@ -47,9 +52,9 @@ def _connect() -> Iterator[sqlite3.Connection]:
         connection.close()
 
 
-def create_user(user: dict[str, Any]) -> None:
+def create_user(user: dict[str, Any], *, consents: list[dict[str, Any]] | None = None) -> None:
     if _use_mongodb():
-        mongo_repository.create_user(user)
+        mongo_repository.create_user(user, consents=consents)
         return
 
     with _connect() as connection:
@@ -57,15 +62,19 @@ def create_user(user: dict[str, Any]) -> None:
             """
             INSERT INTO users (
                 user_id, email, display_name, password_hash, terms_accepted,
-                terms_accepted_at, created_at, updated_at
+                terms_accepted_at, terms_version, privacy_accepted,
+                privacy_accepted_at, privacy_version, created_at, updated_at
             )
             VALUES (
                 :user_id, :email, :display_name, :password_hash, :terms_accepted,
-                :terms_accepted_at, :created_at, :updated_at
+                :terms_accepted_at, :terms_version, :privacy_accepted,
+                :privacy_accepted_at, :privacy_version, :created_at, :updated_at
             )
             """,
             user,
         )
+        for consent in consents or []:
+            _insert_consent_log(connection, consent)
 
 
 def ensure_user_exists(user_id: str) -> None:
@@ -83,8 +92,11 @@ def ensure_user_exists(user_id: str) -> None:
 
         connection.execute(
             """
-            INSERT INTO users (user_id, email, display_name, password_hash, terms_accepted)
-            VALUES (?, ?, ?, ?, 0)
+            INSERT INTO users (
+                user_id, email, display_name, password_hash,
+                terms_accepted, privacy_accepted
+            )
+            VALUES (?, ?, ?, ?, 0, 0)
             """,
             (
                 user_id,
@@ -101,9 +113,8 @@ def get_user_by_email(email: str) -> dict[str, Any] | None:
 
     with _connect() as connection:
         row = connection.execute(
-            """
-            SELECT user_id, email, display_name, password_hash, terms_accepted,
-                terms_accepted_at, created_at, updated_at
+            f"""
+            SELECT {USER_COLUMNS}
             FROM users
             WHERE email = ? AND deleted_at IS NULL
             """,
@@ -118,9 +129,8 @@ def get_user_by_id(user_id: str) -> dict[str, Any] | None:
 
     with _connect() as connection:
         row = connection.execute(
-            """
-            SELECT user_id, email, display_name, password_hash, terms_accepted,
-                terms_accepted_at, created_at, updated_at
+            f"""
+            SELECT {USER_COLUMNS}
             FROM users
             WHERE user_id = ? AND deleted_at IS NULL
             """,
@@ -129,29 +139,87 @@ def get_user_by_id(user_id: str) -> dict[str, Any] | None:
         return _row_to_dict(row)
 
 
-def accept_user_terms(user_id: str, accepted_at: str) -> dict[str, Any] | None:
+def accept_user_terms(user_id: str, accepted_at: str, *, version: str | None = None) -> dict[str, Any] | None:
+    return update_user_consent(
+        user_id,
+        doc="terms",
+        version=version or "",
+        accepted_at=accepted_at,
+    )
+
+
+def update_user_consent(
+    user_id: str,
+    *,
+    doc: str,
+    version: str,
+    accepted_at: str,
+) -> dict[str, Any] | None:
     if _use_mongodb():
-        return mongo_repository.accept_user_terms(user_id, accepted_at)
+        return mongo_repository.update_user_consent(
+            user_id,
+            doc=doc,
+            version=version,
+            accepted_at=accepted_at,
+        )
+
+    assignments = {
+        "terms": (
+            "terms_accepted = 1, terms_accepted_at = ?, terms_version = ?, updated_at = ?"
+        ),
+        "privacy": (
+            "privacy_accepted = 1, privacy_accepted_at = ?, privacy_version = ?, "
+            "updated_at = ?"
+        ),
+    }
+    set_clause = assignments.get(doc)
+    if set_clause is None:
+        raise ValueError("doc deve ser terms ou privacy")
 
     with _connect() as connection:
         connection.execute(
-            """
+            f"""
             UPDATE users
-            SET terms_accepted = 1, terms_accepted_at = ?, updated_at = ?
+            SET {set_clause}
             WHERE user_id = ? AND deleted_at IS NULL
             """,
-            (accepted_at, accepted_at, user_id),
+            (accepted_at, version, accepted_at, user_id),
         )
         row = connection.execute(
-            """
-            SELECT user_id, email, display_name, password_hash, terms_accepted,
-                terms_accepted_at, created_at, updated_at
+            f"""
+            SELECT {USER_COLUMNS}
             FROM users
             WHERE user_id = ? AND deleted_at IS NULL
             """,
             (user_id,),
         ).fetchone()
         return _row_to_dict(row)
+
+
+def append_consent_log(consent: dict[str, Any]) -> None:
+    if _use_mongodb():
+        mongo_repository.append_consent_log(consent)
+        return
+
+    with _connect() as connection:
+        _insert_consent_log(connection, consent)
+
+
+def list_consent_log(user_id: str) -> list[dict[str, Any]]:
+    if _use_mongodb():
+        return mongo_repository.list_consent_log(user_id)
+
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT user_id, doc, version, accepted_at
+            FROM consent_log
+            WHERE user_id = ?
+            ORDER BY accepted_at ASC, consent_id ASC
+            """,
+            (user_id,),
+        ).fetchall()
+        return [_row_to_dict(row) or {} for row in rows]
 
 
 def update_user_password_hash(
@@ -177,9 +245,8 @@ def update_user_password_hash(
             (password_hash, updated_at, user_id),
         )
         row = connection.execute(
-            """
-            SELECT user_id, email, display_name, password_hash, terms_accepted,
-                terms_accepted_at, created_at, updated_at
+            f"""
+            SELECT {USER_COLUMNS}
             FROM users
             WHERE user_id = ? AND deleted_at IS NULL
             """,
@@ -709,7 +776,17 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row)
 
 
-def _ensure_terms_columns(connection: sqlite3.Connection) -> None:
+def _insert_consent_log(connection: sqlite3.Connection, consent: dict[str, Any]) -> None:
+    connection.execute(
+        """
+        INSERT INTO consent_log (user_id, doc, version, accepted_at)
+        VALUES (:user_id, :doc, :version, :accepted_at)
+        """,
+        consent,
+    )
+
+
+def _ensure_consent_columns(connection: sqlite3.Connection) -> None:
     columns = {
         row["name"] if isinstance(row, sqlite3.Row) else row[1]
         for row in connection.execute("PRAGMA table_info(users)").fetchall()
@@ -720,6 +797,36 @@ def _ensure_terms_columns(connection: sqlite3.Connection) -> None:
         )
     if "terms_accepted_at" not in columns:
         connection.execute("ALTER TABLE users ADD COLUMN terms_accepted_at TEXT")
+    if "terms_version" not in columns:
+        connection.execute("ALTER TABLE users ADD COLUMN terms_version TEXT")
+    if "privacy_accepted" not in columns:
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN privacy_accepted INTEGER NOT NULL DEFAULT 0",
+        )
+    if "privacy_accepted_at" not in columns:
+        connection.execute("ALTER TABLE users ADD COLUMN privacy_accepted_at TEXT")
+    if "privacy_version" not in columns:
+        connection.execute("ALTER TABLE users ADD COLUMN privacy_version TEXT")
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS consent_log (
+            consent_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            doc TEXT NOT NULL,
+            version TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+            CHECK (doc IN ('terms', 'privacy'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_consent_log_user_accepted
+            ON consent_log (user_id, accepted_at)
+        """
+    )
 
 
 def _json_or_none(value: Any) -> str | None:

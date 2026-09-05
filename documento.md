@@ -65,7 +65,10 @@ curl http://localhost:8000/health
 ### `POST /auth/register`
 
 Cria um novo usuario persistido no servidor e devolve um token JWT de acesso.
-O body deve enviar `terms_accepted=true`; sem esse aceite a API retorna `400`.
+O body deve enviar os quatro campos de consentimento, com as versoes vigentes
+(`CURRENT_TERMS_VERSION` e `CURRENT_PRIVACY_VERSION`, hoje `"1.0"`).
+Sem os quatro campos, ou com versao diferente da vigente, a API retorna `400`
+e nao cria o usuario. O signup grava duas linhas no `consent_log` (terms e privacy).
 
 ### Body esperado
 
@@ -74,7 +77,10 @@ O body deve enviar `terms_accepted=true`; sem esse aceite a API retorna `400`.
   "display_name": "Adriano Lima",
   "email": "adriano@email.com",
   "password": "senha-forte-123",
-  "terms_accepted": true
+  "terms_accepted": true,
+  "terms_version": "1.0",
+  "privacy_accepted": true,
+  "privacy_version": "1.0"
 }
 ```
 
@@ -83,7 +89,7 @@ O body deve enviar `terms_accepted=true`; sem esse aceite a API retorna `400`.
 ```bash
 curl -X POST \
   -H "Content-Type: application/json" \
-  -d "{\"display_name\":\"Adriano Lima\",\"email\":\"adriano@email.com\",\"password\":\"senha-forte-123\",\"terms_accepted\":true}" \
+  -d "{\"display_name\":\"Adriano Lima\",\"email\":\"adriano@email.com\",\"password\":\"senha-forte-123\",\"terms_accepted\":true,\"terms_version\":\"1.0\",\"privacy_accepted\":true,\"privacy_version\":\"1.0\"}" \
   http://localhost:8000/auth/register
 ```
 
@@ -99,6 +105,10 @@ curl -X POST \
     "display_name": "Adriano Lima",
     "terms_accepted": true,
     "terms_accepted_at": "2026-06-08T12:00:00+00:00",
+    "terms_version": "1.0",
+    "privacy_accepted": true,
+    "privacy_accepted_at": "2026-06-08T12:00:00+00:00",
+    "privacy_version": "1.0",
     "created_at": "2026-04-27T18:30:00+00:00",
     "updated_at": "2026-04-27T18:30:00+00:00"
   }
@@ -110,6 +120,7 @@ curl -X POST \
 - `400`: nome obrigatorio
 - `400`: email invalido
 - `400`: senha com menos de 8 caracteres
+- `400`: aceite de termos/privacidade ausente ou versao diferente da vigente
 - `409`: email ja cadastrado
 
 ## 3. Entrar na conta
@@ -194,11 +205,37 @@ curl \
 ### `GET /users/me`
 
 Retorna o `user_id` resolvido pela autenticacao atual e, quando existir, tambem `email` e `display_name`.
-Tambem retorna `terms_accepted` e `terms_accepted_at` para o app decidir se precisa mostrar o termo para contas existentes.
+Tambem retorna `terms_*` e `privacy_*` (aceite, versao e timestamp).
+
+Se `terms_version` ou `privacy_version` for diferente da vigente, rotas autenticadas
+(exceto `POST /consent` e `GET /legal/*`) respondem `403` com `TERMS_OUTDATED` ou `PRIVACY_OUTDATED`.
+
+### `GET /legal/terms` e `GET /legal/privacy`
+
+Servem o markdown estatico da versao pedida. `404` se a versao nao existir.
+
+```bash
+curl "http://localhost:8000/legal/terms?version=1.0"
+curl "http://localhost:8000/legal/privacy?version=1.0"
+```
+
+### `POST /consent`
+
+Reaceite autenticado de um documento. Body: `{ "doc": "terms"|"privacy", "version": "1.0" }`.
+A versao deve ser a vigente. A API faz append no `consent_log` e atualiza os campos no usuario.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer <jwt>" \
+  -H "Content-Type: application/json" \
+  -d "{\"doc\":\"terms\",\"version\":\"1.0\"}" \
+  http://localhost:8000/consent
+```
 
 ### `POST /users/me/terms/accept`
 
-Registra o aceite do termo de uso para o usuario autenticado. Deve ser chamado quando `terms_accepted=false`.
+Mantido por compatibilidade: registra o aceite da versao vigente de termos
+(append no log + atualiza o usuario). Prefira `POST /consent`.
 
 Body esperado:
 
@@ -207,8 +244,6 @@ Body esperado:
   "accepted": true
 }
 ```
-
-Contas reais sem aceite recebem `403` nos endpoints protegidos de uso ate registrar o aceite.
 
 ### Exemplo
 
@@ -720,7 +755,7 @@ curl \
 1. `GET /health`
 2. `POST /auth/register` ou `POST /auth/login`
 3. `GET /auth/me`
-4. `POST /users/me/terms/accept` quando `terms_accepted=false`
+4. `POST /consent` quando a API responder `403` com `TERMS_OUTDATED` ou `PRIVACY_OUTDATED`
 5. `GET /users/me/status`
 6. `POST /users/me/upload-cv`
 7. `POST /users/me/rebuild-embeddings`

@@ -13,12 +13,29 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     terms_accepted INTEGER NOT NULL DEFAULT 0,
     terms_accepted_at TEXT,
+    terms_version TEXT,
+    privacy_accepted INTEGER NOT NULL DEFAULT 0,
+    privacy_accepted_at TEXT,
+    privacy_version TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     deleted_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
+
+CREATE TABLE IF NOT EXISTS consent_log (
+    consent_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    doc TEXT NOT NULL,
+    version TEXT NOT NULL,
+    accepted_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+    CHECK (doc IN ('terms', 'privacy'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_consent_log_user_accepted
+    ON consent_log (user_id, accepted_at);
 
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
     reset_token_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -199,3 +216,6 @@ CREATE INDEX IF NOT EXISTS idx_generated_files_user_id
 
 INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (1, 'initial_sqlite_schema');
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (2, 'versioned_consent_log');
