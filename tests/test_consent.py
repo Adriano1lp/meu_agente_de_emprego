@@ -115,6 +115,38 @@ def test_consent_rejects_non_current_version(isolated_db):
     assert exc.value.status_code == 400
 
 
+def test_existing_sqlite_users_table_gains_consent_columns(tmp_path, monkeypatch):
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE users (
+                user_id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TEXT,
+                updated_at TEXT,
+                deleted_at TEXT
+            )
+            """
+        )
+        connection.commit()
+
+    monkeypatch.setattr("config.DATABASE_PATH", db_path)
+    monkeypatch.setattr("config.PERSISTENCE_BACKEND", "sqlite")
+    monkeypatch.setattr("database.repository.DATABASE_PATH", db_path)
+    monkeypatch.setattr("database.repository.PERSISTENCE_BACKEND", "sqlite")
+    from database.repository import initialize_database
+
+    initialize_database(db_path)
+    user = _register(email="legacy-migrate@example.com")
+    assert user["terms_version"] == CURRENT_TERMS_VERSION
+    assert len(list_consent_log(user["user_id"])) == 2
+
+
 def test_legal_docs_v1_and_unknown_version():
     terms = get_legal_markdown("terms", "1.0")
     privacy = get_legal_markdown("privacy", "1.0")

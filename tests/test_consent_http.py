@@ -1,10 +1,54 @@
 from __future__ import annotations
 
+import sys
+from types import ModuleType
+from unittest.mock import MagicMock
+
 from config import CURRENT_PRIVACY_VERSION, CURRENT_TERMS_VERSION
 from database.repository import list_consent_log, update_user_consent
 
 
+def _install_heavy_service_stubs() -> None:
+    stubs = {
+        "services.main_chat": {
+            "generate_cover_letter": MagicMock(),
+            "pipeline_with_details": MagicMock(),
+        },
+        "services.main_carta": {
+            "gerar_pdf_carta_apresentacao": MagicMock(),
+        },
+        "services.main_curriculo": {
+            "gerar_pdf_profissional": MagicMock(),
+        },
+        "services.main_rag": {
+            "rebuild_vectorstore_for_user": MagicMock(),
+        },
+        "services.development_plan": {
+            "DEFAULT_ANALYSIS_LIMIT": 10,
+            "MAX_ANALYSIS_LIMIT": 20,
+            "generate_development_plan": MagicMock(),
+            "read_active_development_plan": MagicMock(),
+            "read_development_plan_history": MagicMock(),
+            "update_development_plan_item_status": MagicMock(),
+        },
+        "services.user_data": {
+            "get_user_profile": MagicMock(),
+            "save_manual_profile": MagicMock(),
+            "save_user_cv": MagicMock(),
+            "save_user_profile": MagicMock(),
+        },
+    }
+    for name, attributes in stubs.items():
+        if name in sys.modules:
+            continue
+        module = ModuleType(name)
+        for key, value in attributes.items():
+            setattr(module, key, value)
+        sys.modules[name] = module
+
+
 def _client():
+    _install_heavy_service_stubs()
     from fastapi.testclient import TestClient
     from main import app
 
