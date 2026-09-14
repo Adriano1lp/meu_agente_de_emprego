@@ -547,6 +547,7 @@ def read_user_status(user_id: str = Depends(_require_terms_accepted)) -> dict[st
         if PERSISTENCE_BACKEND == "mongodb"
         else chroma_dir.exists() and any(chroma_dir.iterdir())
     )
+    entitlement = get_entitlement(user_id)
 
     return {
         "user_id": user_id,
@@ -557,6 +558,12 @@ def read_user_status(user_id: str = Depends(_require_terms_accepted)) -> dict[st
             count_generated_files(user_id),
             len([item for item in output_dir.iterdir() if item.is_file()]),
         ),
+        "plan": entitlement["plan"],
+        "used": entitlement["used"],
+        "limit": entitlement["limit"],
+        "remaining": entitlement["remaining"],
+        "period": entitlement["period"],
+        "subscription_status": entitlement["subscription_status"],
     }
 
 
