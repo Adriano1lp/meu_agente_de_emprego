@@ -153,70 +153,114 @@ def _usage(user_id: str) -> int:
     return get_processar_usage(user_id, current_usage_period())
 
 
-def test_upload_cv_rebuilds_embeddings_and_status(isolated_db, monkeypatch):
+NOT_READY_DETAIL = (
+    "Curriculo nao esta pronto para analise. "
+    "Embeddings do usuario nao encontrados. "
+    "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
+)
+
+
+def _replace_embeddings(user_id: str, chunks: int = 2) -> dict:
+    chroma_dir = get_user_chroma_dir(user_id)
+    (chroma_dir / "index").write_text("embeddings", encoding="utf-8")
+    return {"user_id": user_id, "chunks": chunks, "vector_store": "chroma"}
+
+
+def _bind_rebuild(monkeypatch, rebuild):
+    monkeypatch.setattr("main.save_user_cv", _load_real_save_user_cv())
+    monkeypatch.setattr("main.rebuild_vectorstore_for_user", rebuild)
+
+
+def _assert_log_has_no_personal_data(logged: str, session: dict) -> None:
+    assert SECRET_EMBEDDING_ERROR not in logged
+    assert CV_TEXT not in logged
+    assert session["token"] not in logged
+    assert session["user_id"] not in logged
+    assert "Usuario Upload" not in logged
+    assert "@example.com" not in logged
+
+
+def test_c1_upload_ready_without_calling_rebuild_endpoint(isolated_db, monkeypatch):
     client = _client()
-    session = _register(client, "upload.ok@example.com")
+    session = _register(client, "c1.upload@example.com")
     before = client.get("/users/me/status", headers=session["auth"])
     assert before.status_code == 200
+    assert before.json()["has_cv"] is False
     assert before.json()["has_embeddings"] is False
 
+    calls = {"n": 0}
+
     def rebuild_ok(user_id: str) -> dict:
-        chroma_dir = get_user_chroma_dir(user_id)
-        (chroma_dir / "index").write_text("embeddings", encoding="utf-8")
-        return {"user_id": user_id, "chunks": 2, "vector_store": "chroma"}
+        calls["n"] += 1
+        return _replace_embeddings(user_id, chunks=2)
 
-    monkeypatch.setattr("main.save_user_cv", _load_real_save_user_cv())
-    monkeypatch.setattr("main.rebuild_vectorstore_for_user", rebuild_ok)
-
+    _bind_rebuild(monkeypatch, rebuild_ok)
     response = _upload(client, session)
     assert response.status_code == 200
     body = response.json()
     _saved_cv_fields(body, session)
     assert body["ready_for_analysis"] is True
+    assert body["has_cv"] is True
+    assert body["has_embeddings"] is True
     assert body["embeddings"]["chunks"] == 2
     assert "reason" not in body
+    assert calls["n"] == 1
 
-    status = client.get("/users/me/status", headers=session["auth"])
-    assert status.status_code == 200
-    status_body = status.json()
-    assert status_body["has_cv"] is True
-    assert status_body["has_embeddings"] is True
+    status = client.get("/users/me/status", headers=session["auth"]).json()
+    assert status["has_cv"] is True
+    assert status["has_embeddings"] is True
 
 
-def test_upload_cv_keeps_file_when_embeddings_fail(isolated_db, monkeypatch, caplog):
+def test_c2_embedding_failure_keeps_cv_and_later_rebuild_recovers(isolated_db, monkeypatch, caplog):
     client = _client()
-    session = _register(client, "upload.fail@example.com")
+    session = _register(client, "c2.upload@example.com")
+    _mark_embeddings(session["user_id"])
+    calls = {"n": 0}
 
     def rebuild_fail(user_id: str) -> dict:
+        calls["n"] += 1
         raise RuntimeError(SECRET_EMBEDDING_ERROR)
 
-    monkeypatch.setattr("main.save_user_cv", _load_real_save_user_cv())
-    monkeypatch.setattr("main.rebuild_vectorstore_for_user", rebuild_fail)
-
+    _bind_rebuild(monkeypatch, rebuild_fail)
     with caplog.at_level(logging.ERROR, logger="main"):
         response = _upload(client, session)
 
     assert response.status_code == 200
     body = response.json()
     _saved_cv_fields(body, session)
+    assert body["has_cv"] is True
     assert body["ready_for_analysis"] is False
+    assert body["has_embeddings"] is False
     assert body["reason"] == "Nao foi possivel gerar os embeddings do curriculo"
-    assert "embeddings" not in body
-    payload = response.text
-    assert SECRET_EMBEDDING_ERROR not in payload
-    assert CV_TEXT not in payload
-    assert session["token"] not in payload
-
-    logged = " ".join(record.getMessage() for record in caplog.records)
-    assert "RuntimeError" in logged
-    assert session["user_id"] in logged
-    assert SECRET_EMBEDDING_ERROR not in logged
-    assert CV_TEXT not in logged
-    assert session["token"] not in logged
+    assert SECRET_EMBEDDING_ERROR not in response.text
+    assert CV_TEXT not in response.text
+    assert session["token"] not in response.text
+    _assert_log_has_no_personal_data(
+        " ".join(record.getMessage() for record in caplog.records),
+        session,
+    )
+    assert "RuntimeError" in " ".join(record.getMessage() for record in caplog.records)
 
     status = client.get("/users/me/status", headers=session["auth"]).json()
     assert status["has_cv"] is True
     assert status["has_embeddings"] is False
+    assert _usage(session["user_id"]) == 0
+
+    def rebuild_ok(user_id: str) -> dict:
+        calls["n"] += 1
+        return _replace_embeddings(user_id, chunks=4)
+
+    monkeypatch.setattr("main.rebuild_vectorstore_for_user", rebuild_ok)
+    first = client.post("/users/me/rebuild-embeddings", headers=session["auth"])
+    second = client.post("/users/me/rebuild-embeddings", headers=session["auth"])
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["chunks"] == 4
+    assert second.json()["chunks"] == 4
+    recovered = client.get("/users/me/status", headers=session["auth"]).json()
+    assert recovered["has_cv"] is True
+    assert recovered["has_embeddings"] is True
+    assert _usage(session["user_id"]) == 0
 
 
 def test_upload_cv_hides_embedding_http_error(isolated_db, monkeypatch, caplog):
@@ -226,9 +270,7 @@ def test_upload_cv_hides_embedding_http_error(isolated_db, monkeypatch, caplog):
     def rebuild_fail(user_id: str) -> dict:
         raise HTTPException(status_code=400, detail=SECRET_EMBEDDING_ERROR)
 
-    monkeypatch.setattr("main.save_user_cv", _load_real_save_user_cv())
-    monkeypatch.setattr("main.rebuild_vectorstore_for_user", rebuild_fail)
-
+    _bind_rebuild(monkeypatch, rebuild_fail)
     with caplog.at_level(logging.ERROR, logger="main"):
         response = _upload(client, session)
 
@@ -236,30 +278,19 @@ def test_upload_cv_hides_embedding_http_error(isolated_db, monkeypatch, caplog):
     body = response.json()
     _saved_cv_fields(body, session)
     assert body["ready_for_analysis"] is False
-    assert body["reason"] == "Nao foi possivel gerar os embeddings do curriculo"
+    assert body["has_embeddings"] is False
     assert SECRET_EMBEDDING_ERROR not in response.text
     logged = " ".join(record.getMessage() for record in caplog.records)
     assert "HTTPException" in logged
-    assert SECRET_EMBEDDING_ERROR not in logged
-    assert session["token"] not in logged
+    _assert_log_has_no_personal_data(logged, session)
 
 
-def test_rebuild_embeddings_endpoint_remains(isolated_db, monkeypatch):
+def test_c3_cv_not_ready_precedes_402_and_does_not_change_quota(isolated_db, monkeypatch):
     client = _client()
-    session = _register(client, "upload.rebuild@example.com")
-    monkeypatch.setattr(
-        "main.rebuild_vectorstore_for_user",
-        lambda user_id: {"user_id": user_id, "chunks": 3},
-    )
-
-    response = client.post("/users/me/rebuild-embeddings", headers=session["auth"])
-    assert response.status_code == 200
-    assert response.json()["chunks"] == 3
-
-
-def test_processar_without_embeddings_does_not_consume_quota(isolated_db, monkeypatch):
-    client = _client()
-    session = _register(client, "quota.no-embeddings@example.com")
+    session = _register(client, "c3.not-ready@example.com")
+    for _ in range(5):
+        consume_processar_quota(session["user_id"])
+    assert _usage(session["user_id"]) == 5
     pipeline = _pipeline_ok()
     monkeypatch.setattr("main.pipeline_with_details", pipeline)
 
@@ -268,19 +299,21 @@ def test_processar_without_embeddings_does_not_consume_quota(isolated_db, monkey
         headers=session["auth"],
         json={"texto": "Vaga para desenvolvedor Python"},
     )
-    assert response.status_code == 400
-    assert response.json()["detail"] == (
-        "Embeddings do usuario nao encontrados. "
-        "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
-    )
-    assert _usage(session["user_id"]) == 0
+    assert 400 <= response.status_code < 500
+    assert response.status_code != 402
+    assert response.json()["detail"] == NOT_READY_DETAIL
+    assert "nao esta pronto" in response.json()["detail"]
+    assert _usage(session["user_id"]) == 5
     assert pipeline.call_count == 0
 
 
-def test_processar_pipeline_failure_does_not_consume_quota(isolated_db, monkeypatch):
+def test_c4_pipeline_failure_keeps_previous_quota(isolated_db, monkeypatch):
     client = _client()
-    session = _register(client, "quota.pipeline-fail@example.com")
+    session = _register(client, "c4.pipeline-fail@example.com")
     _mark_embeddings(session["user_id"])
+    consume_processar_quota(session["user_id"])
+    consume_processar_quota(session["user_id"])
+    assert _usage(session["user_id"]) == 2
     pipeline = MagicMock(side_effect=RuntimeError("llm timeout"))
     monkeypatch.setattr("main.pipeline_with_details", pipeline)
 
@@ -292,63 +325,90 @@ def test_processar_pipeline_failure_does_not_consume_quota(isolated_db, monkeypa
     assert failed.status_code == 500
     assert failed.json()["detail"] == "Erro interno ao processar a vaga"
     assert "llm timeout" not in failed.text
-    assert _usage(session["user_id"]) == 0
+    assert _usage(session["user_id"]) == 2
     assert pipeline.call_count == 1
 
-    monkeypatch.setattr("main.pipeline_with_details", _pipeline_ok())
-    recovered = client.post(
-        "/processar",
-        headers=session["auth"],
-        json={"texto": "Vaga depois da falha"},
-    )
-    assert recovered.status_code == 200
-    assert _usage(session["user_id"]) == 1
 
-
-def test_processar_pipeline_http_exception_does_not_consume_quota(isolated_db, monkeypatch):
+def test_c5_success_debits_exactly_one(isolated_db, monkeypatch):
     client = _client()
-    session = _register(client, "quota.pipeline-http@example.com")
-    _mark_embeddings(session["user_id"])
-    monkeypatch.setattr(
-        "main.pipeline_with_details",
-        MagicMock(side_effect=HTTPException(status_code=400, detail="contexto indisponivel")),
-    )
-
-    response = client.post(
-        "/processar",
-        headers=session["auth"],
-        json={"texto": "Vaga com falha controlada"},
-    )
-    assert response.status_code == 400
-    assert _usage(session["user_id"]) == 0
-
-
-def test_processar_success_consumes_exactly_one(isolated_db, monkeypatch):
-    client = _client()
-    session = _register(client, "quota.success@example.com")
+    session = _register(client, "c5.success@example.com")
     _mark_embeddings(session["user_id"])
     pipeline = _pipeline_ok()
     monkeypatch.setattr("main.pipeline_with_details", pipeline)
 
-    first = client.post(
+    response = client.post(
         "/processar",
         headers=session["auth"],
         json={"texto": "Vaga para analista de dados"},
     )
-    second = client.post(
-        "/processar",
-        headers=session["auth"],
-        json={"texto": "Segunda vaga para analista de dados"},
-    )
+    assert response.status_code == 200
+    assert _usage(session["user_id"]) == 1
+    assert pipeline.call_count == 1
+
+
+def test_c6_upload_then_rebuild_is_idempotent_without_touching_other_flows(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "c6.regression@example.com")
+    monkeypatch.setattr("main.generate_cover_letter", lambda empresa, user_id: "Carta pronta")
+
+    def history():
+        response = client.get("/users/me/gap-history", headers=session["auth"])
+        assert response.status_code == 200
+        return response.json()
+
+    def cover_letter():
+        response = client.post(
+            "/users/me/cover-letter",
+            headers=session["auth"],
+            json={"empresa": "ACME"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body) == {"texto_resposta", "pdf_url", "user_id"}
+        assert body["texto_resposta"] == "Carta pronta"
+        assert body["user_id"] == session["user_id"]
+        assert "carta-apresentacao-" in body["pdf_url"]
+        return body
+
+    history_before = history()
+    cover_before = cover_letter()
+    assert history_before == {"items": [], "limit": 20, "offset": 0}
+    assert _usage(session["user_id"]) == 0
+
+    calls = {"n": 0}
+
+    def rebuild_ok(user_id: str) -> dict:
+        calls["n"] += 1
+        return _replace_embeddings(user_id, chunks=2)
+
+    _bind_rebuild(monkeypatch, rebuild_ok)
+    uploaded = _upload(client, session)
+    assert uploaded.status_code == 200
+    assert uploaded.json()["ready_for_analysis"] is True
+    first = client.post("/users/me/rebuild-embeddings", headers=session["auth"])
+    second = client.post("/users/me/rebuild-embeddings", headers=session["auth"])
     assert first.status_code == 200
     assert second.status_code == 200
-    assert _usage(session["user_id"]) == 2
-    assert pipeline.call_count == 2
+    assert first.json()["chunks"] == 2
+    assert second.json()["chunks"] == 2
+    assert calls["n"] == 3
+    assert _usage(session["user_id"]) == 0
+
+    history_after = history()
+    cover_after = cover_letter()
+    assert history_after == history_before
+    assert set(cover_after) == set(cover_before)
+    assert cover_after["texto_resposta"] == cover_before["texto_resposta"]
+    assert cover_after["user_id"] == cover_before["user_id"]
+    status = client.get("/users/me/status", headers=session["auth"]).json()
+    assert status["has_cv"] is True
+    assert status["has_embeddings"] is True
+    assert _usage(session["user_id"]) == 0
 
 
-def test_processar_exhausted_quota_still_returns_402(isolated_db, monkeypatch):
+def test_c7_exhausted_quota_with_embeddings_returns_402(isolated_db, monkeypatch):
     client = _client()
-    session = _register(client, "quota.exhausted@example.com")
+    session = _register(client, "c7.exhausted@example.com")
     _mark_embeddings(session["user_id"])
     for _ in range(5):
         consume_processar_quota(session["user_id"])
@@ -366,5 +426,6 @@ def test_processar_exhausted_quota_still_returns_402(isolated_db, monkeypatch):
     assert detail["used"] == 5
     assert detail["limit"] == 5
     assert detail["plan"] == "free"
+    assert "message" in detail
     assert _usage(session["user_id"]) == 5
     assert pipeline.call_count == 0

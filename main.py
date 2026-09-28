@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from database.repository import (
     create_generated_file,
     create_job_analysis_insight,
     create_processing_run,
+    delete_embedding_chunks,
     get_latest_user_document_id,
     is_deleted_user,
     list_job_analysis_insights,
@@ -81,6 +83,7 @@ ensure_runtime_config()
 logger = logging.getLogger(__name__)
 
 _MISSING_EMBEDDINGS_DETAIL = (
+    "Curriculo nao esta pronto para analise. "
     "Embeddings do usuario nao encontrados. "
     "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
 )
@@ -473,19 +476,20 @@ def upload_cv(
     try:
         embeddings = rebuild_vectorstore_for_user(user_id)
     except Exception as exc:
-        _log_cv_embedding_failure(user_id, exc)
+        _log_cv_embedding_failure(exc)
+        _invalidate_user_embeddings(user_id)
         return _upload_cv_without_embeddings(saved)
 
     if not _user_has_embeddings(user_id):
-        logger.error(
-            "Embeddings ausentes apos rebuild de CV user_id=%s",
-            user_id,
-        )
+        logger.error("Embeddings ausentes apos rebuild de CV")
+        _invalidate_user_embeddings(user_id)
         return _upload_cv_without_embeddings(saved)
 
     return {
         **saved,
         "embeddings": embeddings,
+        "has_cv": True,
+        "has_embeddings": True,
         "ready_for_analysis": True,
     }
 
@@ -912,22 +916,40 @@ def _user_has_embeddings(user_id: str, chroma_dir: Path | None = None) -> bool:
 def _upload_cv_without_embeddings(saved: dict[str, Any]) -> dict[str, Any]:
     return {
         **saved,
+        "has_cv": True,
+        "has_embeddings": False,
         "ready_for_analysis": False,
         "reason": _EMBEDDINGS_FAILURE_REASON,
     }
 
 
-def _log_cv_embedding_failure(user_id: str, exc: BaseException) -> None:
+def _invalidate_user_embeddings(user_id: str) -> None:
+    try:
+        delete_embedding_chunks(user_id)
+        chroma_dir = get_user_chroma_dir(user_id)
+        for child in list(chroma_dir.iterdir()):
+            if child.is_symlink():
+                child.unlink()
+            elif child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    except Exception as exc:
+        logger.error(
+            "Falha ao invalidar embeddings apos erro de upload error_type=%s",
+            type(exc).__name__,
+        )
+
+
+def _log_cv_embedding_failure(exc: BaseException) -> None:
     if isinstance(exc, HTTPException):
         logger.error(
-            "Falha ao gerar embeddings apos upload de CV user_id=%s error_type=HTTPException status_code=%s",
-            user_id,
+            "Falha ao gerar embeddings apos upload de CV error_type=HTTPException status_code=%s",
             exc.status_code,
         )
         return
     logger.error(
-        "Falha ao gerar embeddings apos upload de CV user_id=%s error_type=%s",
-        user_id,
+        "Falha ao gerar embeddings apos upload de CV error_type=%s",
         type(exc).__name__,
     )
 
@@ -937,8 +959,7 @@ def _release_processar_quota_quietly(user_id: str, period: str) -> None:
         release_processar_quota(user_id, period=period)
     except Exception as exc:
         logger.error(
-            "Falha ao estornar cota de processar user_id=%s error_type=%s",
-            user_id,
+            "Falha ao estornar cota de processar error_type=%s",
             type(exc).__name__,
         )
 

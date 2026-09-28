@@ -453,6 +453,7 @@ def _load_candidate_context(vaga_texto: str, user_id: str) -> str:
             raise HTTPException(
                 status_code=400,
                 detail=(
+                    "Curriculo nao esta pronto para analise. "
                     "Embeddings do usuario nao encontrados. "
                     "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
                 ),
@@ -581,6 +582,7 @@ def _load_mongodb_candidate_context(vaga_texto: str, user_id: str) -> list[str]:
         raise HTTPException(
             status_code=400,
             detail=(
+                "Curriculo nao esta pronto para analise. "
                 "Embeddings do usuario nao encontrados. "
                 "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
             ),

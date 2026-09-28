@@ -522,6 +522,11 @@ def replace_embedding_chunks(
         return
 
 
+def delete_embedding_chunks(user_id: str) -> None:
+    if _use_mongodb():
+        mongo_repository.delete_embedding_chunks(user_id)
+
+
 def count_embedding_chunks(user_id: str) -> int:
     if _use_mongodb():
         return mongo_repository.count_embedding_chunks(user_id)

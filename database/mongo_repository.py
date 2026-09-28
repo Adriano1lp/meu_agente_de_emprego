@@ -300,6 +300,10 @@ def replace_embedding_chunks(
     )
 
 
+def delete_embedding_chunks(user_id: str) -> None:
+    _get_collection("embedding_chunks").delete_many({"user_id": user_id})
+
+
 def count_embedding_chunks(user_id: str) -> int:
     return int(_get_collection("embedding_chunks").count_documents({"user_id": user_id}))
 
