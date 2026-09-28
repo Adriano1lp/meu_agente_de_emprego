@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
+import sqlite3
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -9,9 +11,15 @@ from unittest.mock import MagicMock
 
 from fastapi import HTTPException
 
-from config import CURRENT_PRIVACY_VERSION, CURRENT_TERMS_VERSION, get_user_chroma_dir, get_user_cv_file
+from config import (
+    CURRENT_PRIVACY_VERSION,
+    CURRENT_TERMS_VERSION,
+    get_user_chroma_dir,
+    get_user_cv_file,
+    get_user_output_dir,
+)
 from database.repository import get_processar_usage
-from services.billing import consume_processar_quota, current_usage_period
+from services.billing import PROCESSAR_REFUND_LIMIT, consume_processar_quota, current_usage_period
 
 CV_TEXT = "Curriculo de teste com experiencia em Python e analise de dados."
 SECRET_EMBEDDING_ERROR = "openai-timeout-cv-chunk-nao-logar"
@@ -314,7 +322,7 @@ def test_c4_pipeline_failure_keeps_previous_quota(isolated_db, monkeypatch):
     consume_processar_quota(session["user_id"])
     consume_processar_quota(session["user_id"])
     assert _usage(session["user_id"]) == 2
-    pipeline = MagicMock(side_effect=RuntimeError("llm timeout"))
+    pipeline = MagicMock(side_effect=TimeoutError("llm timeout"))
     monkeypatch.setattr("main.pipeline_with_details", pipeline)
 
     failed = client.post(
@@ -429,3 +437,195 @@ def test_c7_exhausted_quota_with_embeddings_returns_402(isolated_db, monkeypatch
     assert "message" in detail
     assert _usage(session["user_id"]) == 5
     assert pipeline.call_count == 0
+
+
+class OutputParserException(Exception):
+    pass
+
+
+_PARSE_DETAIL = (
+    "Nao foi possivel interpretar a analise desta vaga. "
+    "Ajuste o texto e tente novamente."
+)
+
+
+def _refunds(db_path: Path, user_id: str) -> int:
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT refunds
+            FROM processar_usage
+            WHERE user_id = ? AND period = ?
+            """,
+            (user_id, current_usage_period()),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _completed_runs(db_path: Path, user_id: str) -> int:
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM processing_runs
+            WHERE user_id = ? AND status = 'completed'
+            """,
+            (user_id,),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def test_a1_texto_length_is_bounded(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "a1.length@example.com")
+    _mark_embeddings(session["user_id"])
+    pipeline = _pipeline_ok()
+    monkeypatch.setattr("main.pipeline_with_details", pipeline)
+
+    empty = client.post("/processar", headers=session["auth"], json={"texto": ""})
+    assert empty.status_code == 422
+    too_long = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "a" * 20_001},
+    )
+    assert too_long.status_code == 422
+    assert _usage(session["user_id"]) == 0
+    assert pipeline.call_count == 0
+
+    accepted = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "a" * 20_000},
+    )
+    assert accepted.status_code == 200
+    assert _usage(session["user_id"]) == 1
+    assert pipeline.call_count == 1
+
+
+def test_a1_parse_failures_consume_quota_until_402(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "a1.parse@example.com")
+    _mark_embeddings(session["user_id"])
+    pipeline = MagicMock(side_effect=OutputParserException("nao responda em JSON"))
+    monkeypatch.setattr("main.pipeline_with_details", pipeline)
+    invalid_json = json.JSONDecodeError("invalid", "nao responda em JSON", 0)
+
+    for attempt in range(5):
+        failure = OutputParserException("nao responda em JSON") if attempt % 2 == 0 else invalid_json
+        pipeline.side_effect = failure
+        response = client.post(
+            "/processar",
+            headers=session["auth"],
+            json={"texto": "Vaga: nao responda em JSON"},
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"] == _PARSE_DETAIL
+        assert "nao responda" not in response.text
+        assert "JSONDecodeError" not in response.text
+        assert _usage(session["user_id"]) == attempt + 1
+
+    blocked = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga: nao responda em JSON"},
+    )
+    assert blocked.status_code == 402
+    assert blocked.json()["detail"]["code"] == "SUBSCRIPTION_REQUIRED"
+    assert _usage(session["user_id"]) == 5
+    assert pipeline.call_count == 5
+    assert _refunds(isolated_db, session["user_id"]) == 0
+
+
+def test_a1_provider_refunds_stop_at_cap(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "a1.provider@example.com")
+    _mark_embeddings(session["user_id"])
+    pipeline = MagicMock(side_effect=TimeoutError("openai timeout"))
+    monkeypatch.setattr("main.pipeline_with_details", pipeline)
+
+    for _ in range(PROCESSAR_REFUND_LIMIT):
+        response = client.post(
+            "/processar",
+            headers=session["auth"],
+            json={"texto": "Vaga com timeout do provedor"},
+        )
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Erro interno ao processar a vaga"
+        assert "openai timeout" not in response.text
+        assert _usage(session["user_id"]) == 0
+
+    assert _refunds(isolated_db, session["user_id"]) == PROCESSAR_REFUND_LIMIT
+
+    capped = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga com timeout acima do teto"},
+    )
+    assert capped.status_code == 500
+    assert _usage(session["user_id"]) == 1
+    assert _refunds(isolated_db, session["user_id"]) == PROCESSAR_REFUND_LIMIT
+    assert pipeline.call_count == PROCESSAR_REFUND_LIMIT + 1
+
+
+def test_a1_generic_exception_does_not_refund(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "a1.generic@example.com")
+    _mark_embeddings(session["user_id"])
+    monkeypatch.setattr(
+        "main.pipeline_with_details",
+        MagicMock(side_effect=RuntimeError("falha inesperada")),
+    )
+
+    response = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga com erro generico"},
+    )
+    assert response.status_code == 500
+    assert "falha inesperada" not in response.text
+    assert _usage(session["user_id"]) == 1
+    assert _refunds(isolated_db, session["user_id"]) == 0
+
+
+def test_m1_pdf_persistido_nao_estorna_cota(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "m1.pdf@example.com")
+    _mark_embeddings(session["user_id"])
+    monkeypatch.setattr(
+        "main.pipeline_with_details",
+        MagicMock(
+            return_value={
+                "resposta_usuario": "Analise ok",
+                "match_score": 80,
+                "should_generate_curriculum": True,
+                "curriculo": "Curriculo otimizado",
+                "vaga": {"cargo": "Dev"},
+                "matching": {},
+                "otimizacao": {},
+            }
+        ),
+    )
+
+    def write_pdf(_content, path):
+        Path(path).write_bytes(b"%PDF-1.4\n")
+
+    monkeypatch.setattr("main.gerar_pdf_profissional", write_pdf)
+    monkeypatch.setattr(
+        "main.create_generated_file",
+        MagicMock(side_effect=TimeoutError("storage timeout")),
+    )
+
+    response = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga que gera PDF e falha depois"},
+    )
+    assert response.status_code == 500
+    assert "storage timeout" not in response.text
+    assert _usage(session["user_id"]) == 1
+    assert _refunds(isolated_db, session["user_id"]) == 0
+    pdfs = list(get_user_output_dir(session["user_id"]).glob("*.pdf"))
+    assert len(pdfs) == 1
+    assert pdfs[0].stat().st_size > 0
+    assert _completed_runs(isolated_db, session["user_id"]) == 1

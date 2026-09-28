@@ -960,9 +960,18 @@ def consume_processar_usage(user_id: str, *, period: str, limit: int) -> dict[st
         return {"allowed": allowed, "used": used}
 
 
-def release_processar_usage(user_id: str, *, period: str) -> dict[str, Any]:
+def release_processar_usage(
+    user_id: str,
+    *,
+    period: str,
+    refund_limit: int,
+) -> dict[str, Any]:
     if _use_mongodb():
-        return mongo_repository.release_processar_usage(user_id, period=period)
+        return mongo_repository.release_processar_usage(
+            user_id,
+            period=period,
+            refund_limit=refund_limit,
+        )
 
     ensure_user_exists(user_id)
     updated_at = datetime.now(UTC).replace(microsecond=0).isoformat()
@@ -971,10 +980,11 @@ def release_processar_usage(user_id: str, *, period: str) -> dict[str, Any]:
             """
             UPDATE processar_usage
             SET used = used - 1,
+                refunds = refunds + 1,
                 updated_at = ?
-            WHERE user_id = ? AND period = ? AND used > 0
+            WHERE user_id = ? AND period = ? AND used > 0 AND refunds < ?
             """,
-            (updated_at, user_id, period),
+            (updated_at, user_id, period, refund_limit),
         )
         row = connection.execute(
             """
@@ -1283,11 +1293,27 @@ def _ensure_billing_schema(connection: sqlite3.Connection) -> None:
             user_id TEXT NOT NULL,
             period TEXT NOT NULL,
             used INTEGER NOT NULL DEFAULT 0,
+            refunds INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (user_id, period),
             FOREIGN KEY (user_id) REFERENCES users (user_id),
-            CHECK (used >= 0)
+            CHECK (used >= 0),
+            CHECK (refunds >= 0)
         )
+        """
+    )
+    usage_columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in connection.execute("PRAGMA table_info(processar_usage)").fetchall()
+    }
+    if "refunds" not in usage_columns:
+        connection.execute(
+            "ALTER TABLE processar_usage ADD COLUMN refunds INTEGER NOT NULL DEFAULT 0"
+        )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO schema_migrations (version, name)
+        VALUES (5, 'processar_usage_refunds')
         """
     )
     connection.execute(

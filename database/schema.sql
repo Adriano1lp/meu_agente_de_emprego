@@ -227,10 +227,12 @@ CREATE TABLE IF NOT EXISTS processar_usage (
     user_id TEXT NOT NULL,
     period TEXT NOT NULL,
     used INTEGER NOT NULL DEFAULT 0,
+    refunds INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, period),
     FOREIGN KEY (user_id) REFERENCES users (user_id),
-    CHECK (used >= 0)
+    CHECK (used >= 0),
+    CHECK (refunds >= 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_processar_usage_period
@@ -253,3 +255,6 @@ VALUES (3, 'stripe_essencial_quotas');
 
 INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (4, 'object_storage_keys');
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (5, 'processar_usage_refunds');

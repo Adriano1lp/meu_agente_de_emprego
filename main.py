@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import importlib
+import json
 import logging
 import shutil
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from auth import create_access_token, decode_access_token, get_current_user_id
 from config import (
@@ -88,6 +92,12 @@ _MISSING_EMBEDDINGS_DETAIL = (
     "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
 )
 _EMBEDDINGS_FAILURE_REASON = "Nao foi possivel gerar os embeddings do curriculo"
+_PROCESSAR_PARSE_FAILURE_DETAIL = (
+    "Nao foi possivel interpretar a analise desta vaga. "
+    "Ajuste o texto e tente novamente."
+)
+_PROCESSAR_INTERNAL_DETAIL = "Erro interno ao processar a vaga"
+_INPUT_EXCEPTION_NAMES = frozenset({"OutputParserException"})
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
@@ -101,7 +111,7 @@ app.add_middleware(
 
 
 class RequestData(BaseModel):
-    texto: str
+    texto: str = Field(min_length=1, max_length=20_000)
 
 
 class CoverLetterRequest(BaseModel):
@@ -713,6 +723,7 @@ def processar(
     reservation = consume_processar_quota(user_id)
     quota_period = str(reservation["period"])
     quota_reserved = True
+    refund_quota = False
     try:
         pipeline_result = pipeline_with_details(texto_entrada, user_id)
         resposta_usuario = str(pipeline_result["resposta_usuario"])
@@ -759,6 +770,7 @@ def processar(
                 nome_arquivo,
                 lambda path: gerar_pdf_profissional(curriculo_otimizado, str(path)),
             )
+            quota_reserved = False
 
             pdf_url = _build_public_file_url(request, nome_arquivo)
             processing_run_id = create_processing_run(
@@ -810,6 +822,8 @@ def processar(
     except HTTPException:
         raise
     except Exception as exc:
+        if _processar_failure_kind(exc) == "provider":
+            refund_quota = True
         create_processing_run(
             {
                 "user_id": user_id,
@@ -823,12 +837,17 @@ def processar(
                 "completed_at": _utc_now_iso(),
             },
         )
+        if _processar_failure_kind(exc) == "input":
+            raise HTTPException(
+                status_code=422,
+                detail=_PROCESSAR_PARSE_FAILURE_DETAIL,
+            ) from exc
         raise HTTPException(
             status_code=500,
-            detail="Erro interno ao processar a vaga",
+            detail=_PROCESSAR_INTERNAL_DETAIL,
         ) from exc
     finally:
-        if quota_reserved:
+        if quota_reserved and refund_quota:
             _release_processar_quota_quietly(user_id, quota_period)
 
 
@@ -952,6 +971,94 @@ def _log_cv_embedding_failure(exc: BaseException) -> None:
         "Falha ao gerar embeddings apos upload de CV error_type=%s",
         type(exc).__name__,
     )
+
+
+def _optional_exception_types(module_name: str, *names: str) -> tuple[type[BaseException], ...]:
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError:
+        return ()
+    found: list[type[BaseException]] = []
+    for name in names:
+        value = getattr(module, name, None)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            found.append(value)
+    return tuple(found)
+
+
+_PROVIDER_EXCEPTION_TYPES: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    ConnectionError,
+    OSError,
+    sqlite3.DatabaseError,
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+    httpx.HTTPStatusError,
+    *_optional_exception_types(
+        "openai",
+        "APIConnectionError",
+        "APITimeoutError",
+        "APIStatusError",
+        "RateLimitError",
+        "InternalServerError",
+    ),
+    *_optional_exception_types("pymongo.errors", "PyMongoError"),
+    *_optional_exception_types("botocore.exceptions", "BotoCoreError", "ClientError"),
+)
+
+_INPUT_EXCEPTION_TYPES: tuple[type[BaseException], ...] = (
+    json.JSONDecodeError,
+    ValidationError,
+    *_optional_exception_types("langchain_core.exceptions", "OutputParserException"),
+)
+
+
+def _iter_exception_causes(exc: BaseException):
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__
+
+
+def _http_status_of(exc: BaseException) -> int | None:
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_input_caused_failure(exc: BaseException) -> bool:
+    if isinstance(exc, _INPUT_EXCEPTION_TYPES):
+        return True
+    return type(exc).__name__ in _INPUT_EXCEPTION_NAMES
+
+
+def _is_provider_or_infra_failure(exc: BaseException) -> bool:
+    if not isinstance(exc, _PROVIDER_EXCEPTION_TYPES):
+        return False
+    status = _http_status_of(exc)
+    if isinstance(exc, httpx.HTTPStatusError) or status is not None:
+        return status == 429 or (status is not None and status >= 500)
+    return True
+
+
+def _processar_failure_kind(exc: BaseException) -> str:
+    saw_provider = False
+    for current in _iter_exception_causes(exc):
+        if _is_input_caused_failure(current):
+            return "input"
+        if _is_provider_or_infra_failure(current):
+            saw_provider = True
+    if saw_provider:
+        return "provider"
+    return "other"
 
 
 def _release_processar_quota_quietly(user_id: str, period: str) -> None:

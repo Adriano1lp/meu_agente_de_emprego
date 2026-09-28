@@ -542,6 +542,7 @@ def consume_processar_usage(user_id: str, *, period: str, limit: int) -> dict[st
                 "user_id": user_id,
                 "period": period,
                 "used": 1,
+                "refunds": 0,
                 "updated_at": now,
             }
         )
@@ -550,7 +551,12 @@ def consume_processar_usage(user_id: str, *, period: str, limit: int) -> dict[st
         return consume_processar_usage(user_id, period=period, limit=limit)
 
 
-def release_processar_usage(user_id: str, *, period: str) -> dict[str, Any]:
+def release_processar_usage(
+    user_id: str,
+    *,
+    period: str,
+    refund_limit: int,
+) -> dict[str, Any]:
     try:
         from pymongo import ReturnDocument
     except ModuleNotFoundError as exc:
@@ -562,8 +568,16 @@ def release_processar_usage(user_id: str, *, period: str) -> dict[str, Any]:
     collection = _get_collection("processar_usage")
     now = _utc_now_iso()
     document = collection.find_one_and_update(
-        {"user_id": user_id, "period": period, "used": {"$gt": 0}},
-        {"$inc": {"used": -1}, "$set": {"updated_at": now}},
+        {
+            "user_id": user_id,
+            "period": period,
+            "used": {"$gt": 0},
+            "$or": [
+                {"refunds": {"$lt": refund_limit}},
+                {"refunds": {"$exists": False}},
+            ],
+        },
+        {"$inc": {"used": -1, "refunds": 1}, "$set": {"updated_at": now}},
         return_document=ReturnDocument.AFTER,
     )
     if document:

@@ -24,6 +24,7 @@ from database.repository import (
 
 PLAN_FREE = "free"
 PLAN_ESSENCIAL = "essencial"
+PROCESSAR_REFUND_LIMIT = 3
 SUBSCRIPTION_ACTIVE = "active"
 SUBSCRIPTION_PAST_DUE = "past_due"
 SUBSCRIPTION_CANCELED = "canceled"
@@ -89,12 +90,17 @@ def consume_processar_quota(user_id: str) -> dict[str, Any]:
 def release_processar_quota(user_id: str, *, period: str | None = None) -> dict[str, Any]:
     """Release one reserved unit in the same period that was consumed.
 
-    The update is conditional on used > 0, so an extra release cannot drive
-    the counter below zero. Call once per successful consume_processar_quota.
+    The update is atomic and only applies when used > 0 and refunds is still
+    below PROCESSAR_REFUND_LIMIT. The refund counter resets with the monthly
+    usage row. Call once per successful consume_processar_quota.
     """
     entitlement = get_entitlement(user_id)
     usage_period = period or entitlement["period"]
-    result = release_processar_usage(entitlement["user_id"], period=usage_period)
+    result = release_processar_usage(
+        entitlement["user_id"],
+        period=usage_period,
+        refund_limit=PROCESSAR_REFUND_LIMIT,
+    )
     entitlement["period"] = usage_period
     entitlement["used"] = int(result["used"])
     entitlement["remaining"] = max(0, entitlement["limit"] - entitlement["used"])
