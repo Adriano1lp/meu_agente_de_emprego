@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import importlib
+import json
+import logging
+import shutil
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from auth import create_access_token, decode_access_token, get_current_user_id
 from config import (
@@ -28,6 +34,7 @@ from database.repository import (
     create_generated_file,
     create_job_analysis_insight,
     create_processing_run,
+    delete_embedding_chunks,
     get_latest_user_document_id,
     is_deleted_user,
     list_job_analysis_insights,
@@ -52,6 +59,7 @@ from services.billing import (
     create_checkout_session,
     get_entitlement,
     handle_stripe_webhook,
+    release_processar_quota,
 )
 from services.legal import get_legal_markdown
 from services.development_plan import (
@@ -76,6 +84,21 @@ from services.user_data import (
 
 ensure_runtime_config()
 
+logger = logging.getLogger(__name__)
+
+_MISSING_EMBEDDINGS_DETAIL = (
+    "Curriculo nao esta pronto para analise. "
+    "Embeddings do usuario nao encontrados. "
+    "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
+)
+_EMBEDDINGS_FAILURE_REASON = "Nao foi possivel gerar os embeddings do curriculo"
+_PROCESSAR_PARSE_FAILURE_DETAIL = (
+    "Nao foi possivel interpretar a analise desta vaga. "
+    "Ajuste o texto e tente novamente."
+)
+_PROCESSAR_INTERNAL_DETAIL = "Erro interno ao processar a vaga"
+_INPUT_EXCEPTION_NAMES = frozenset({"OutputParserException"})
+
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
 app.add_middleware(
@@ -88,7 +111,7 @@ app.add_middleware(
 
 
 class RequestData(BaseModel):
-    texto: str
+    texto: str = Field(min_length=1, max_length=20_000)
 
 
 class CoverLetterRequest(BaseModel):
@@ -459,7 +482,26 @@ def upload_cv(
     file: UploadFile = File(...),
     user_id: str = Depends(_require_terms_accepted),
 ) -> dict[str, Any]:
-    return save_user_cv(file, user_id)
+    saved = save_user_cv(file, user_id)
+    try:
+        embeddings = rebuild_vectorstore_for_user(user_id)
+    except Exception as exc:
+        _log_cv_embedding_failure(exc)
+        _invalidate_user_embeddings(user_id)
+        return _upload_cv_without_embeddings(saved)
+
+    if not _user_has_embeddings(user_id):
+        logger.error("Embeddings ausentes apos rebuild de CV")
+        _invalidate_user_embeddings(user_id)
+        return _upload_cv_without_embeddings(saved)
+
+    return {
+        **saved,
+        "embeddings": embeddings,
+        "has_cv": True,
+        "has_embeddings": True,
+        "ready_for_analysis": True,
+    }
 
 
 @app.post("/users/me/profile")
@@ -542,11 +584,7 @@ def read_user_status(user_id: str = Depends(_require_terms_accepted)) -> dict[st
     output_dir = get_user_output_dir(user_id)
     profile = get_user_profile(user_id)
     has_cv = cv_file.exists() or get_latest_user_document_id(user_id) is not None
-    has_embeddings = (
-        count_embedding_chunks(user_id) > 0
-        if PERSISTENCE_BACKEND == "mongodb"
-        else chroma_dir.exists() and any(chroma_dir.iterdir())
-    )
+    has_embeddings = _user_has_embeddings(user_id, chroma_dir)
     entitlement = get_entitlement(user_id)
 
     return {
@@ -679,8 +717,13 @@ def processar(
     if not texto_entrada:
         raise HTTPException(status_code=400, detail="Texto nao pode ser vazio")
 
-    consume_processar_quota(user_id)
+    if not _user_has_embeddings(user_id):
+        raise HTTPException(status_code=400, detail=_MISSING_EMBEDDINGS_DETAIL)
 
+    reservation = consume_processar_quota(user_id)
+    quota_period = str(reservation["period"])
+    quota_reserved = True
+    refund_quota = False
     try:
         pipeline_result = pipeline_with_details(texto_entrada, user_id)
         resposta_usuario = str(pipeline_result["resposta_usuario"])
@@ -710,7 +753,7 @@ def processar(
                 generation_blocked=True,
                 blocked_reason="low_match_score",
             )
-            return {
+            response = {
                 "texto_resposta": resposta_usuario,
                 "pdf_url": None,
                 "user_id": user_id,
@@ -719,63 +762,68 @@ def processar(
                 "generation_blocked": True,
                 "blocked_reason": "low_match_score",
             }
+        else:
+            curriculo_otimizado = str(pipeline_result["curriculo"])
+            nome_arquivo = f"{uuid.uuid4()}.pdf"
+            caminho_pdf, object_key = _persist_generated_pdf(
+                user_id,
+                nome_arquivo,
+                lambda path: gerar_pdf_profissional(curriculo_otimizado, str(path)),
+            )
+            quota_reserved = False
 
-        curriculo_otimizado = str(pipeline_result["curriculo"])
-        nome_arquivo = f"{uuid.uuid4()}.pdf"
-        caminho_pdf, object_key = _persist_generated_pdf(
-            user_id,
-            nome_arquivo,
-            lambda path: gerar_pdf_profissional(curriculo_otimizado, str(path)),
-        )
+            pdf_url = _build_public_file_url(request, nome_arquivo)
+            processing_run_id = create_processing_run(
+                {
+                    "user_id": user_id,
+                    "input_text": texto_entrada,
+                    "job_data": pipeline_result.get("vaga"),
+                    "matching": pipeline_result.get("matching"),
+                    "optimization": pipeline_result.get("otimizacao"),
+                    "response_text": resposta_usuario,
+                    "status": "completed",
+                    "error_message": None,
+                    "completed_at": _utc_now_iso(),
+                },
+            )
+            create_generated_file(
+                {
+                    "user_id": user_id,
+                    "processing_run_id": processing_run_id,
+                    "file_name": nome_arquivo,
+                    "file_path": str(caminho_pdf),
+                    "object_key": object_key,
+                    "public_url": pdf_url,
+                    "media_type": "application/pdf",
+                    "bytes_size": caminho_pdf.stat().st_size if caminho_pdf.exists() else None,
+                },
+            )
+            _create_gap_history_from_pipeline(
+                user_id=user_id,
+                processing_run_id=processing_run_id,
+                input_text=texto_entrada,
+                pipeline_result=pipeline_result,
+                match_score=match_score,
+                status="completed",
+                generation_blocked=False,
+                blocked_reason=None,
+            )
 
-        pdf_url = _build_public_file_url(request, nome_arquivo)
-        processing_run_id = create_processing_run(
-            {
+            response = {
+                "texto_resposta": resposta_usuario,
+                "pdf_url": pdf_url,
                 "user_id": user_id,
-                "input_text": texto_entrada,
-                "job_data": pipeline_result.get("vaga"),
-                "matching": pipeline_result.get("matching"),
-                "optimization": pipeline_result.get("otimizacao"),
-                "response_text": resposta_usuario,
-                "status": "completed",
-                "error_message": None,
-                "completed_at": _utc_now_iso(),
-            },
-        )
-        create_generated_file(
-            {
-                "user_id": user_id,
-                "processing_run_id": processing_run_id,
-                "file_name": nome_arquivo,
-                "file_path": str(caminho_pdf),
-                "object_key": object_key,
-                "public_url": pdf_url,
-                "media_type": "application/pdf",
-                "bytes_size": caminho_pdf.stat().st_size if caminho_pdf.exists() else None,
-            },
-        )
-        _create_gap_history_from_pipeline(
-            user_id=user_id,
-            processing_run_id=processing_run_id,
-            input_text=texto_entrada,
-            pipeline_result=pipeline_result,
-            match_score=match_score,
-            status="completed",
-            generation_blocked=False,
-            blocked_reason=None,
-        )
-
-        return {
-            "texto_resposta": resposta_usuario,
-            "pdf_url": pdf_url,
-            "user_id": user_id,
-            "match_score": match_score,
-            "pdf_generated": True,
-            "generation_blocked": False,
-        }
+                "match_score": match_score,
+                "pdf_generated": True,
+                "generation_blocked": False,
+            }
+        quota_reserved = False
+        return response
     except HTTPException:
         raise
     except Exception as exc:
+        if _processar_failure_kind(exc) == "provider":
+            refund_quota = True
         create_processing_run(
             {
                 "user_id": user_id,
@@ -789,10 +837,18 @@ def processar(
                 "completed_at": _utc_now_iso(),
             },
         )
+        if _processar_failure_kind(exc) == "input":
+            raise HTTPException(
+                status_code=422,
+                detail=_PROCESSAR_PARSE_FAILURE_DETAIL,
+            ) from exc
         raise HTTPException(
             status_code=500,
-            detail="Erro interno ao processar a vaga",
+            detail=_PROCESSAR_INTERNAL_DETAIL,
         ) from exc
+    finally:
+        if quota_reserved and refund_quota:
+            _release_processar_quota_quietly(user_id, quota_period)
 
 
 @app.post("/users/me/cover-letter")
@@ -867,6 +923,152 @@ def generate_user_cover_letter(
             status_code=500,
             detail="Erro interno ao gerar carta de apresentacao",
         ) from exc
+
+
+def _user_has_embeddings(user_id: str, chroma_dir: Path | None = None) -> bool:
+    if PERSISTENCE_BACKEND == "mongodb":
+        return count_embedding_chunks(user_id) > 0
+    directory = chroma_dir if chroma_dir is not None else get_user_chroma_dir(user_id)
+    return directory.exists() and any(directory.iterdir())
+
+
+def _upload_cv_without_embeddings(saved: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **saved,
+        "has_cv": True,
+        "has_embeddings": False,
+        "ready_for_analysis": False,
+        "reason": _EMBEDDINGS_FAILURE_REASON,
+    }
+
+
+def _invalidate_user_embeddings(user_id: str) -> None:
+    try:
+        delete_embedding_chunks(user_id)
+        chroma_dir = get_user_chroma_dir(user_id)
+        for child in list(chroma_dir.iterdir()):
+            if child.is_symlink():
+                child.unlink()
+            elif child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    except Exception as exc:
+        logger.error(
+            "Falha ao invalidar embeddings apos erro de upload error_type=%s",
+            type(exc).__name__,
+        )
+
+
+def _log_cv_embedding_failure(exc: BaseException) -> None:
+    if isinstance(exc, HTTPException):
+        logger.error(
+            "Falha ao gerar embeddings apos upload de CV error_type=HTTPException status_code=%s",
+            exc.status_code,
+        )
+        return
+    logger.error(
+        "Falha ao gerar embeddings apos upload de CV error_type=%s",
+        type(exc).__name__,
+    )
+
+
+def _optional_exception_types(module_name: str, *names: str) -> tuple[type[BaseException], ...]:
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError:
+        return ()
+    found: list[type[BaseException]] = []
+    for name in names:
+        value = getattr(module, name, None)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            found.append(value)
+    return tuple(found)
+
+
+_PROVIDER_EXCEPTION_TYPES: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    ConnectionError,
+    OSError,
+    sqlite3.DatabaseError,
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+    httpx.HTTPStatusError,
+    *_optional_exception_types(
+        "openai",
+        "APIConnectionError",
+        "APITimeoutError",
+        "APIStatusError",
+        "RateLimitError",
+        "InternalServerError",
+    ),
+    *_optional_exception_types("pymongo.errors", "PyMongoError"),
+    *_optional_exception_types("botocore.exceptions", "BotoCoreError", "ClientError"),
+)
+
+_INPUT_EXCEPTION_TYPES: tuple[type[BaseException], ...] = (
+    json.JSONDecodeError,
+    ValidationError,
+    *_optional_exception_types("langchain_core.exceptions", "OutputParserException"),
+)
+
+
+def _iter_exception_causes(exc: BaseException):
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__
+
+
+def _http_status_of(exc: BaseException) -> int | None:
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_input_caused_failure(exc: BaseException) -> bool:
+    if isinstance(exc, _INPUT_EXCEPTION_TYPES):
+        return True
+    return type(exc).__name__ in _INPUT_EXCEPTION_NAMES
+
+
+def _is_provider_or_infra_failure(exc: BaseException) -> bool:
+    if not isinstance(exc, _PROVIDER_EXCEPTION_TYPES):
+        return False
+    status = _http_status_of(exc)
+    if isinstance(exc, httpx.HTTPStatusError) or status is not None:
+        return status == 429 or (status is not None and status >= 500)
+    return True
+
+
+def _processar_failure_kind(exc: BaseException) -> str:
+    saw_provider = False
+    for current in _iter_exception_causes(exc):
+        if _is_input_caused_failure(current):
+            return "input"
+        if _is_provider_or_infra_failure(current):
+            saw_provider = True
+    if saw_provider:
+        return "provider"
+    return "other"
+
+
+def _release_processar_quota_quietly(user_id: str, period: str) -> None:
+    try:
+        release_processar_quota(user_id, period=period)
+    except Exception as exc:
+        logger.error(
+            "Falha ao estornar cota de processar error_type=%s",
+            type(exc).__name__,
+        )
 
 
 def _persist_generated_pdf(

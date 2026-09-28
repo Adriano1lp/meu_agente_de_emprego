@@ -192,9 +192,17 @@ def test_past_due_falls_back_to_free_quota(isolated_db):
     assert entitlement["subscription_status"] == "past_due"
 
 
+def _mark_embeddings(user_id: str) -> None:
+    from config import get_user_chroma_dir
+
+    chroma_dir = get_user_chroma_dir(user_id)
+    (chroma_dir / "index").write_text("embeddings", encoding="utf-8")
+
+
 def test_processar_returns_402_when_free_quota_exhausted(isolated_db):
     client = _client()
     session = _register(client, "billing.processar-402@example.com")
+    _mark_embeddings(session["user_id"])
     for _ in range(5):
         consume_processar_quota(session["user_id"])
 
@@ -210,6 +218,7 @@ def test_processar_returns_402_when_free_quota_exhausted(isolated_db):
     assert detail["limit"] == 5
     assert detail["plan"] == "free"
     assert "message" in detail
+    assert get_processar_usage(session["user_id"], current_usage_period()) == 5
 
 
 def test_processar_empty_text_does_not_consume_quota(isolated_db):
@@ -227,6 +236,7 @@ def test_processar_empty_text_does_not_consume_quota(isolated_db):
 def test_processar_consumes_one_unit_when_allowed(isolated_db):
     client = _client()
     session = _register(client, "billing.processar-ok@example.com")
+    _mark_embeddings(session["user_id"])
     response = client.post(
         "/processar",
         headers=session["auth"],
@@ -234,6 +244,24 @@ def test_processar_consumes_one_unit_when_allowed(isolated_db):
     )
     assert response.status_code == 200
     assert get_processar_usage(session["user_id"], current_usage_period()) == 1
+
+
+def test_release_processar_quota_decrements_once_and_stops_at_zero(isolated_db):
+    from services.billing import release_processar_quota
+
+    client = _client()
+    session = _register(client, "billing.release@example.com")
+    user_id = session["user_id"]
+    period = current_usage_period()
+    consume_processar_quota(user_id)
+    consume_processar_quota(user_id)
+
+    release_processar_quota(user_id, period=period)
+    assert get_processar_usage(user_id, period) == 1
+    release_processar_quota(user_id, period=period)
+    assert get_processar_usage(user_id, period) == 0
+    release_processar_quota(user_id, period=period)
+    assert get_processar_usage(user_id, period) == 0
 
 
 def test_checkout_requires_auth_and_consent(isolated_db):

@@ -300,6 +300,10 @@ def replace_embedding_chunks(
     )
 
 
+def delete_embedding_chunks(user_id: str) -> None:
+    _get_collection("embedding_chunks").delete_many({"user_id": user_id})
+
+
 def count_embedding_chunks(user_id: str) -> int:
     return int(_get_collection("embedding_chunks").count_documents({"user_id": user_id}))
 
@@ -538,12 +542,50 @@ def consume_processar_usage(user_id: str, *, period: str, limit: int) -> dict[st
                 "user_id": user_id,
                 "period": period,
                 "used": 1,
+                "refunds": 0,
                 "updated_at": now,
             }
         )
         return {"allowed": True, "used": 1}
     except DuplicateKeyError:
         return consume_processar_usage(user_id, period=period, limit=limit)
+
+
+def release_processar_usage(
+    user_id: str,
+    *,
+    period: str,
+    refund_limit: int,
+) -> dict[str, Any]:
+    try:
+        from pymongo import ReturnDocument
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dependencia pymongo nao instalada. Execute pip install -r requirements.txt."
+        ) from exc
+
+    ensure_user_exists(user_id)
+    collection = _get_collection("processar_usage")
+    now = _utc_now_iso()
+    document = collection.find_one_and_update(
+        {
+            "user_id": user_id,
+            "period": period,
+            "used": {"$gt": 0},
+            "$or": [
+                {"refunds": {"$lt": refund_limit}},
+                {"refunds": {"$exists": False}},
+            ],
+        },
+        {"$inc": {"used": -1, "refunds": 1}, "$set": {"updated_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if document:
+        return {"released": True, "used": int(document["used"])}
+
+    existing = collection.find_one({"user_id": user_id, "period": period})
+    used = int(existing.get("used") or 0) if existing else 0
+    return {"released": False, "used": used}
 
 
 def claim_stripe_webhook_event(event_id: str, event_type: str) -> bool:
