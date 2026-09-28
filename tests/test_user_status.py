@@ -136,6 +136,7 @@ def test_status_includes_quota_fields_for_free_plan(isolated_db):
     assert "has_cv" in body
     assert "has_profile" in body
     assert "has_embeddings" in body
+    assert body["has_embeddings"] is False
     assert "generated_files" in body
     assert "email" not in body
     assert "display_name" not in body

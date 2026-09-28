@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,7 @@ from services.billing import (
     create_checkout_session,
     get_entitlement,
     handle_stripe_webhook,
+    release_processar_quota,
 )
 from services.legal import get_legal_markdown
 from services.development_plan import (
@@ -75,6 +77,14 @@ from services.user_data import (
 )
 
 ensure_runtime_config()
+
+logger = logging.getLogger(__name__)
+
+_MISSING_EMBEDDINGS_DETAIL = (
+    "Embeddings do usuario nao encontrados. "
+    "Envie o curriculo e execute POST /users/me/rebuild-embeddings antes de processar a vaga."
+)
+_EMBEDDINGS_FAILURE_REASON = "Nao foi possivel gerar os embeddings do curriculo"
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
@@ -459,7 +469,25 @@ def upload_cv(
     file: UploadFile = File(...),
     user_id: str = Depends(_require_terms_accepted),
 ) -> dict[str, Any]:
-    return save_user_cv(file, user_id)
+    saved = save_user_cv(file, user_id)
+    try:
+        embeddings = rebuild_vectorstore_for_user(user_id)
+    except Exception as exc:
+        _log_cv_embedding_failure(user_id, exc)
+        return _upload_cv_without_embeddings(saved)
+
+    if not _user_has_embeddings(user_id):
+        logger.error(
+            "Embeddings ausentes apos rebuild de CV user_id=%s",
+            user_id,
+        )
+        return _upload_cv_without_embeddings(saved)
+
+    return {
+        **saved,
+        "embeddings": embeddings,
+        "ready_for_analysis": True,
+    }
 
 
 @app.post("/users/me/profile")
@@ -542,11 +570,7 @@ def read_user_status(user_id: str = Depends(_require_terms_accepted)) -> dict[st
     output_dir = get_user_output_dir(user_id)
     profile = get_user_profile(user_id)
     has_cv = cv_file.exists() or get_latest_user_document_id(user_id) is not None
-    has_embeddings = (
-        count_embedding_chunks(user_id) > 0
-        if PERSISTENCE_BACKEND == "mongodb"
-        else chroma_dir.exists() and any(chroma_dir.iterdir())
-    )
+    has_embeddings = _user_has_embeddings(user_id, chroma_dir)
     entitlement = get_entitlement(user_id)
 
     return {
@@ -679,8 +703,12 @@ def processar(
     if not texto_entrada:
         raise HTTPException(status_code=400, detail="Texto nao pode ser vazio")
 
-    consume_processar_quota(user_id)
+    if not _user_has_embeddings(user_id):
+        raise HTTPException(status_code=400, detail=_MISSING_EMBEDDINGS_DETAIL)
 
+    reservation = consume_processar_quota(user_id)
+    quota_period = str(reservation["period"])
+    quota_reserved = True
     try:
         pipeline_result = pipeline_with_details(texto_entrada, user_id)
         resposta_usuario = str(pipeline_result["resposta_usuario"])
@@ -710,7 +738,7 @@ def processar(
                 generation_blocked=True,
                 blocked_reason="low_match_score",
             )
-            return {
+            response = {
                 "texto_resposta": resposta_usuario,
                 "pdf_url": None,
                 "user_id": user_id,
@@ -719,60 +747,62 @@ def processar(
                 "generation_blocked": True,
                 "blocked_reason": "low_match_score",
             }
+        else:
+            curriculo_otimizado = str(pipeline_result["curriculo"])
+            nome_arquivo = f"{uuid.uuid4()}.pdf"
+            caminho_pdf, object_key = _persist_generated_pdf(
+                user_id,
+                nome_arquivo,
+                lambda path: gerar_pdf_profissional(curriculo_otimizado, str(path)),
+            )
 
-        curriculo_otimizado = str(pipeline_result["curriculo"])
-        nome_arquivo = f"{uuid.uuid4()}.pdf"
-        caminho_pdf, object_key = _persist_generated_pdf(
-            user_id,
-            nome_arquivo,
-            lambda path: gerar_pdf_profissional(curriculo_otimizado, str(path)),
-        )
+            pdf_url = _build_public_file_url(request, nome_arquivo)
+            processing_run_id = create_processing_run(
+                {
+                    "user_id": user_id,
+                    "input_text": texto_entrada,
+                    "job_data": pipeline_result.get("vaga"),
+                    "matching": pipeline_result.get("matching"),
+                    "optimization": pipeline_result.get("otimizacao"),
+                    "response_text": resposta_usuario,
+                    "status": "completed",
+                    "error_message": None,
+                    "completed_at": _utc_now_iso(),
+                },
+            )
+            create_generated_file(
+                {
+                    "user_id": user_id,
+                    "processing_run_id": processing_run_id,
+                    "file_name": nome_arquivo,
+                    "file_path": str(caminho_pdf),
+                    "object_key": object_key,
+                    "public_url": pdf_url,
+                    "media_type": "application/pdf",
+                    "bytes_size": caminho_pdf.stat().st_size if caminho_pdf.exists() else None,
+                },
+            )
+            _create_gap_history_from_pipeline(
+                user_id=user_id,
+                processing_run_id=processing_run_id,
+                input_text=texto_entrada,
+                pipeline_result=pipeline_result,
+                match_score=match_score,
+                status="completed",
+                generation_blocked=False,
+                blocked_reason=None,
+            )
 
-        pdf_url = _build_public_file_url(request, nome_arquivo)
-        processing_run_id = create_processing_run(
-            {
+            response = {
+                "texto_resposta": resposta_usuario,
+                "pdf_url": pdf_url,
                 "user_id": user_id,
-                "input_text": texto_entrada,
-                "job_data": pipeline_result.get("vaga"),
-                "matching": pipeline_result.get("matching"),
-                "optimization": pipeline_result.get("otimizacao"),
-                "response_text": resposta_usuario,
-                "status": "completed",
-                "error_message": None,
-                "completed_at": _utc_now_iso(),
-            },
-        )
-        create_generated_file(
-            {
-                "user_id": user_id,
-                "processing_run_id": processing_run_id,
-                "file_name": nome_arquivo,
-                "file_path": str(caminho_pdf),
-                "object_key": object_key,
-                "public_url": pdf_url,
-                "media_type": "application/pdf",
-                "bytes_size": caminho_pdf.stat().st_size if caminho_pdf.exists() else None,
-            },
-        )
-        _create_gap_history_from_pipeline(
-            user_id=user_id,
-            processing_run_id=processing_run_id,
-            input_text=texto_entrada,
-            pipeline_result=pipeline_result,
-            match_score=match_score,
-            status="completed",
-            generation_blocked=False,
-            blocked_reason=None,
-        )
-
-        return {
-            "texto_resposta": resposta_usuario,
-            "pdf_url": pdf_url,
-            "user_id": user_id,
-            "match_score": match_score,
-            "pdf_generated": True,
-            "generation_blocked": False,
-        }
+                "match_score": match_score,
+                "pdf_generated": True,
+                "generation_blocked": False,
+            }
+        quota_reserved = False
+        return response
     except HTTPException:
         raise
     except Exception as exc:
@@ -793,6 +823,9 @@ def processar(
             status_code=500,
             detail="Erro interno ao processar a vaga",
         ) from exc
+    finally:
+        if quota_reserved:
+            _release_processar_quota_quietly(user_id, quota_period)
 
 
 @app.post("/users/me/cover-letter")
@@ -867,6 +900,47 @@ def generate_user_cover_letter(
             status_code=500,
             detail="Erro interno ao gerar carta de apresentacao",
         ) from exc
+
+
+def _user_has_embeddings(user_id: str, chroma_dir: Path | None = None) -> bool:
+    if PERSISTENCE_BACKEND == "mongodb":
+        return count_embedding_chunks(user_id) > 0
+    directory = chroma_dir if chroma_dir is not None else get_user_chroma_dir(user_id)
+    return directory.exists() and any(directory.iterdir())
+
+
+def _upload_cv_without_embeddings(saved: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **saved,
+        "ready_for_analysis": False,
+        "reason": _EMBEDDINGS_FAILURE_REASON,
+    }
+
+
+def _log_cv_embedding_failure(user_id: str, exc: BaseException) -> None:
+    if isinstance(exc, HTTPException):
+        logger.error(
+            "Falha ao gerar embeddings apos upload de CV user_id=%s error_type=HTTPException status_code=%s",
+            user_id,
+            exc.status_code,
+        )
+        return
+    logger.error(
+        "Falha ao gerar embeddings apos upload de CV user_id=%s error_type=%s",
+        user_id,
+        type(exc).__name__,
+    )
+
+
+def _release_processar_quota_quietly(user_id: str, period: str) -> None:
+    try:
+        release_processar_quota(user_id, period=period)
+    except Exception as exc:
+        logger.error(
+            "Falha ao estornar cota de processar user_id=%s error_type=%s",
+            user_id,
+            type(exc).__name__,
+        )
 
 
 def _persist_generated_pdf(

@@ -15,6 +15,7 @@ from database.repository import (
     claim_stripe_webhook_event,
     consume_processar_usage,
     get_processar_usage,
+    release_processar_usage,
     get_user_by_id,
     get_user_by_stripe_customer_id,
     get_user_by_stripe_subscription_id,
@@ -80,6 +81,21 @@ def consume_processar_quota(user_id: str) -> dict[str, Any]:
             ),
         )
 
+    entitlement["used"] = int(result["used"])
+    entitlement["remaining"] = max(0, entitlement["limit"] - entitlement["used"])
+    return entitlement
+
+
+def release_processar_quota(user_id: str, *, period: str | None = None) -> dict[str, Any]:
+    """Release one reserved unit in the same period that was consumed.
+
+    The update is conditional on used > 0, so an extra release cannot drive
+    the counter below zero. Call once per successful consume_processar_quota.
+    """
+    entitlement = get_entitlement(user_id)
+    usage_period = period or entitlement["period"]
+    result = release_processar_usage(entitlement["user_id"], period=usage_period)
+    entitlement["period"] = usage_period
     entitlement["used"] = int(result["used"])
     entitlement["remaining"] = max(0, entitlement["limit"] - entitlement["used"])
     return entitlement

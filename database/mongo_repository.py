@@ -546,6 +546,30 @@ def consume_processar_usage(user_id: str, *, period: str, limit: int) -> dict[st
         return consume_processar_usage(user_id, period=period, limit=limit)
 
 
+def release_processar_usage(user_id: str, *, period: str) -> dict[str, Any]:
+    try:
+        from pymongo import ReturnDocument
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dependencia pymongo nao instalada. Execute pip install -r requirements.txt."
+        ) from exc
+
+    ensure_user_exists(user_id)
+    collection = _get_collection("processar_usage")
+    now = _utc_now_iso()
+    document = collection.find_one_and_update(
+        {"user_id": user_id, "period": period, "used": {"$gt": 0}},
+        {"$inc": {"used": -1}, "$set": {"updated_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if document:
+        return {"released": True, "used": int(document["used"])}
+
+    existing = collection.find_one({"user_id": user_id, "period": period})
+    used = int(existing.get("used") or 0) if existing else 0
+    return {"released": False, "used": used}
+
+
 def claim_stripe_webhook_event(event_id: str, event_type: str) -> bool:
     try:
         from pymongo.errors import DuplicateKeyError

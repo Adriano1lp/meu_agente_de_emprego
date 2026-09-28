@@ -955,6 +955,34 @@ def consume_processar_usage(user_id: str, *, period: str, limit: int) -> dict[st
         return {"allowed": allowed, "used": used}
 
 
+def release_processar_usage(user_id: str, *, period: str) -> dict[str, Any]:
+    if _use_mongodb():
+        return mongo_repository.release_processar_usage(user_id, period=period)
+
+    ensure_user_exists(user_id)
+    updated_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE processar_usage
+            SET used = used - 1,
+                updated_at = ?
+            WHERE user_id = ? AND period = ? AND used > 0
+            """,
+            (updated_at, user_id, period),
+        )
+        row = connection.execute(
+            """
+            SELECT used
+            FROM processar_usage
+            WHERE user_id = ? AND period = ?
+            """,
+            (user_id, period),
+        ).fetchone()
+        used = int(row["used"]) if row else 0
+        return {"released": cursor.rowcount > 0, "used": used}
+
+
 def claim_stripe_webhook_event(event_id: str, event_type: str) -> bool:
     if _use_mongodb():
         return mongo_repository.claim_stripe_webhook_event(event_id, event_type)
