@@ -145,7 +145,7 @@ Scenario: Sem embeddings não debita
 ### Estado das superfícies
 
 - **Web W-Carta #8:** merged / live no Static. Confirmação device Adriano pode ainda estar pendente para FECHADA formal se aplicável.
-- **App #9:** gate `has_embeddings` + exibição de `detail` em **402/422**; Apple device com GO de aparelho; **FECHADA** pendente ajuste de data (abaixo).
+- **App #9:** gate `has_embeddings` + exibição de `detail` em **402/422**. Confirm device Adriano **parcial** (funcionou no Apple nas 3 checagens de UX). O ajuste da data literal era o **API #16** — **não** tratar o GO de aparelho como **FECHADA** completa da fatia Carta até smoke pós-deploy do #16.
 
 ### Contrato de produto
 
@@ -154,11 +154,11 @@ Scenario: Sem embeddings não debita
 - Sem embeddings: client bloqueia; backend deve falhar com mensagem clara (débito se gate incompleto).
 - **Carta pode não consumir** a cota de `/processar` (regra Money em avaliação — não assumir débito até decisão).
 
-### Ajuste em curso (30/09/2026)
+### Data na carta — status (30/09/2026)
 
-- Prompt da API ainda contém o literal **`[data atual]`**.
-- **Backend** corrige para a **data real de geração (D)** formatada em **pt-BR**.
-- **Mobile** em standby até o backend publicar a correção; depois smoke device e só então FECHADA da fatia de carta/app conforme cadeia.
+- **API PR #16** já **mergeado** (`454fa14`): código injeta data real de geração **D** em **pt-BR** (America/Sao_Paulo); o literal **`[data atual]`** **não** permanece no prompt.
+- **Pendente:** deploy live / smoke QA (carta com data real, sem `[data atual]`) → confirm device se aplicável → então **PO FECHADA** da fatia.
+- **Mobile** em standby só se sobrar bug de UI após o deploy.
 
 ---
 
