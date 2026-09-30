@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from fastapi import HTTPException
 from langchain_chroma import Chroma
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
@@ -19,6 +23,25 @@ from database.repository import find_similar_embedding_chunks, get_latest_user_c
 
 OPENAI_API_KEY = ensure_openai_api_key()
 MINIMUM_MATCH_SCORE_TO_GENERATE_CURRICULUM = 60
+FUSO_CARTA = ZoneInfo("America/Sao_Paulo")
+_MESES_PT_BR = (
+    "janeiro",
+    "fevereiro",
+    "março",
+    "abril",
+    "maio",
+    "junho",
+    "julho",
+    "agosto",
+    "setembro",
+    "outubro",
+    "novembro",
+    "dezembro",
+)
+_PLACEHOLDER_DATA_ATUAL = re.compile(
+    r"\[\s*data\s+atual\s*\]|(?<![\w\[])data\s+atual(?![\w\]])",
+    re.IGNORECASE,
+)
 
 
 class Vaga(BaseModel):
@@ -330,6 +353,7 @@ prompt_carta_apresentacao = PromptTemplate(
         Entradas:
         - Dados do candidato {contexto}
         - Empresa alvo {empresa}
+        - Data da carta {data}
 
         Objetivo:
         Criar uma carta de apresentacao profissional, objetiva e aderente ao perfil do candidato.
@@ -342,9 +366,10 @@ prompt_carta_apresentacao = PromptTemplate(
         - Use tom profissional, direto e confiante.
         - Nao use markdown.
         - Nao inclua explicacoes fora da carta.
+        - Na linha de local e data, copie exatamente a data informada, sem colchetes.
 
         Estrutura:
-        [Cidade], [data atual]
+        [Cidade], {data}
 
         Prezados recrutadores da {empresa},
 
@@ -359,7 +384,7 @@ prompt_carta_apresentacao = PromptTemplate(
         Atenciosamente,
         [Nome do candidato quando disponivel]
     """,
-    input_variables=["contexto", "empresa"],
+    input_variables=["contexto", "empresa", "data"],
 )
 
 embeddings = OpenAIEmbeddings(
@@ -428,18 +453,41 @@ def pipeline_with_details(vaga_texto: str, user_id: str) -> dict[str, object]:
     }
 
 
+def formatar_data_carta(momento: datetime | None = None) -> str:
+    """Data de geracao da carta em pt-BR, no fuso America/Sao_Paulo."""
+    instante = momento if momento is not None else _agora_carta()
+    if instante.tzinfo is None:
+        instante = instante.replace(tzinfo=FUSO_CARTA)
+    else:
+        instante = instante.astimezone(FUSO_CARTA)
+    mes = _MESES_PT_BR[instante.month - 1]
+    return f"{instante.day} de {mes} de {instante.year}"
+
+
+def aplicar_data_na_carta(texto: str, data: str) -> str:
+    """Remove placeholder de data que o modelo ainda copie e grava a data real."""
+    return _PLACEHOLDER_DATA_ATUAL.sub(data, texto)
+
+
+def _agora_carta() -> datetime:
+    return datetime.now(FUSO_CARTA)
+
+
 def generate_cover_letter(company_name: str, user_id: str) -> str:
     empresa = company_name.strip()
     if not empresa:
         raise HTTPException(status_code=400, detail="Nome da empresa nao pode ser vazio")
 
     contexto = _load_candidate_context(empresa, user_id)
-    return cadeia_carta_apresentacao.invoke(
+    data = formatar_data_carta()
+    carta = cadeia_carta_apresentacao.invoke(
         {
             "contexto": contexto,
             "empresa": empresa,
+            "data": data,
         },
     )
+    return aplicar_data_na_carta(str(carta), data)
 
 
 def _load_candidate_context(vaga_texto: str, user_id: str) -> str:
