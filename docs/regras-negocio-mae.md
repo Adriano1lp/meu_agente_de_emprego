@@ -145,7 +145,7 @@ Scenario: Sem embeddings não debita
 ### Estado das superfícies
 
 - **Web W-Carta #8:** merged / live no Static. Confirmação device Adriano pode ainda estar pendente para FECHADA formal se aplicável.
-- **App #9:** gate `has_embeddings` + exibição de `detail` em **402/422**. Confirm device Adriano **parcial** (funcionou no Apple nas 3 checagens de UX). O ajuste da data literal era o **API #16** — **não** tratar o GO de aparelho como **FECHADA** completa da fatia Carta até smoke pós-deploy do #16.
+- **App #9:** gate `has_embeddings` + exibição de `detail` em **402/422**. Device ainda **aguarda confirm Adriano** (FECHADA formal app/carta no device pendente só disso).
 
 ### Contrato de produto
 
@@ -156,9 +156,9 @@ Scenario: Sem embeddings não debita
 
 ### Data na carta — status (30/09/2026)
 
-- **API PR #16** já **mergeado** (`454fa14`): código injeta data real de geração **D** em **pt-BR** (America/Sao_Paulo); o literal **`[data atual]`** **não** permanece no prompt.
-- **Pendente:** deploy live / smoke QA (carta com data real, sem `[data atual]`) → confirm device se aplicável → então **PO FECHADA** da fatia.
-- **Mobile** em standby só se sobrar bug de UI após o deploy.
+- **API PR #16** **mergeado, LIVE e PO FECHADA** (`454fa14`): geração com data real **D** em **pt-BR** (America/Sao_Paulo). O literal **`[data atual]`** não é o comportamento do prompt/código mergeado.
+- **Smoke QA GO**: carta gerada com data real pt-BR (exemplo confirmado: «São Paulo, 30 de setembro de 2026»); **sem** literal `[data atual]`.
+- **App #9:** device ainda **aguarda confirm Adriano**; FECHADA formal app/carta no device pendente só disso.
 
 ---
 
