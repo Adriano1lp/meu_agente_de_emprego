@@ -223,6 +223,12 @@ CREATE TABLE IF NOT EXISTS generated_files (
 CREATE INDEX IF NOT EXISTS idx_generated_files_user_id
     ON generated_files (user_id);
 
+CREATE INDEX IF NOT EXISTS idx_generated_files_user_run
+    ON generated_files (user_id, processing_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_generated_files_user_name
+    ON generated_files (user_id, file_name);
+
 CREATE TABLE IF NOT EXISTS processar_usage (
     user_id TEXT NOT NULL,
     period TEXT NOT NULL,
