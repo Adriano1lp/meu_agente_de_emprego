@@ -12,6 +12,18 @@ from fastapi import Header, HTTPException
 from config import AUTH_MODE, JWT_EXPIRATION_MINUTES, JWT_SECRET, sanitize_user_id
 
 
+def get_bearer_user_id(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> str:
+    """Identifica o usuário só pelo Bearer JWT. Ignora X-User-Id."""
+    if authorization is None or not authorization.strip():
+        raise HTTPException(
+            status_code=401,
+            detail="Header Authorization obrigatorio",
+        )
+    return _get_user_id_from_jwt_header(authorization)
+
+
 def get_current_user_id(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     authorization: str | None = Header(default=None, alias="Authorization"),

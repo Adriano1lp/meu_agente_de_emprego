@@ -12,10 +12,15 @@ from typing import Any
 import httpx
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from auth import create_access_token, decode_access_token, get_current_user_id
+from auth import (
+    create_access_token,
+    decode_access_token,
+    get_bearer_user_id,
+    get_current_user_id,
+)
 from config import (
     APP_NAME,
     APP_VERSION,
@@ -28,6 +33,7 @@ from config import (
     get_user_cv_file,
     get_user_output_dir,
 )
+from database.generated_file_names import is_safe_generated_file_name
 from database.repository import (
     count_embedding_chunks,
     count_generated_files,
@@ -38,6 +44,7 @@ from database.repository import (
     get_latest_user_document_id,
     is_deleted_user,
     list_job_analysis_insights,
+    user_owns_generated_file,
 )
 from services.main_chat import generate_cover_letter, pipeline_with_details
 from services.main_carta import gerar_pdf_carta_apresentacao
@@ -284,6 +291,14 @@ def _raise_if_consent_outdated(user_id: str) -> None:
 
 
 def _require_terms_accepted(user_id: str = Depends(get_current_user_id)) -> str:
+    return _enforce_active_consent(user_id)
+
+
+def _require_jwt_terms_accepted(user_id: str = Depends(get_bearer_user_id)) -> str:
+    return _enforce_active_consent(user_id)
+
+
+def _enforce_active_consent(user_id: str) -> str:
     if is_deleted_user(user_id):
         raise HTTPException(status_code=401, detail="Usuario nao encontrado")
     _raise_if_consent_outdated(user_id)
@@ -610,32 +625,36 @@ def rebuild_embeddings(user_id: str = Depends(_require_terms_accepted)) -> dict[
     return rebuild_vectorstore_for_user(user_id)
 
 
+_FILE_NOT_FOUND_DETAIL = "Arquivo nao encontrado"
+
+
 @app.get("/users/me/files/{file_name}")
 def download_user_file(
     file_name: str,
-    user_id: str = Depends(_require_terms_accepted),
+    user_id: str = Depends(_require_jwt_terms_accepted),
 ) -> Response:
-    safe_file_name = Path(file_name).name
-    if safe_file_name != file_name:
-        raise HTTPException(status_code=400, detail="Nome de arquivo invalido")
+    if not is_safe_generated_file_name(file_name) or not user_owns_generated_file(
+        user_id,
+        file_name,
+    ):
+        raise HTTPException(status_code=404, detail=_FILE_NOT_FOUND_DETAIL)
 
-    object_key = user_object_key(user_id, "outputs", safe_file_name)
-    file_path = get_user_output_dir(user_id) / safe_file_name
-    if file_path.exists() and file_path.is_file():
-        return FileResponse(
-            path=file_path,
-            media_type="application/pdf",
-            filename=safe_file_name,
+    try:
+        file_bytes = _read_owned_generated_pdf(user_id, file_name)
+    except Exception as exc:
+        logger.error(
+            "Falha ao ler PDF gerado error_type=%s",
+            type(exc).__name__,
         )
+        raise HTTPException(status_code=404, detail=_FILE_NOT_FOUND_DETAIL) from None
 
-    file_bytes = get_object_bytes(object_key)
     if file_bytes is None:
-        raise HTTPException(status_code=404, detail="Arquivo nao encontrado")
+        raise HTTPException(status_code=404, detail=_FILE_NOT_FOUND_DETAIL)
 
     return Response(
         content=file_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{safe_file_name}"'},
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
     )
 
 
@@ -1069,6 +1088,18 @@ def _release_processar_quota_quietly(user_id: str, period: str) -> None:
             "Falha ao estornar cota de processar error_type=%s",
             type(exc).__name__,
         )
+
+
+def _read_owned_generated_pdf(user_id: str, file_name: str) -> bytes | None:
+    """Lê o PDF do dono. Não usa file_path/object_key gravados no banco."""
+    output_dir = get_user_output_dir(user_id).resolve()
+    candidate = output_dir / file_name
+    resolved = candidate.resolve()
+    if resolved.parent != output_dir:
+        return None
+    if resolved.is_file():
+        return resolved.read_bytes()
+    return get_object_bytes(user_object_key(user_id, "outputs", file_name))
 
 
 def _persist_generated_pdf(

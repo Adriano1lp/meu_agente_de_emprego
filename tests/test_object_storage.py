@@ -14,6 +14,7 @@ from config import (
     ensure_runtime_config,
     s3_configured,
 )
+from database.repository import create_generated_file
 from services.object_storage import (
     delete_prefix,
     exists,
@@ -183,23 +184,44 @@ def test_s3_stub_put_signed_url_and_purge(isolated_db, monkeypatch: pytest.Monke
         monkeypatch.setattr("config.OBJECT_STORAGE_BACKEND", "local")
 
 
+def _register_generated_file(user_id: object, file_name: str, *, object_key: str | None) -> None:
+    create_generated_file(
+        {
+            "user_id": user_id,
+            "processing_run_id": None,
+            "file_name": file_name,
+            "file_path": f"/var/lib/fatia/private/{file_name}",
+            "object_key": object_key,
+            "public_url": f"https://files.example/public/{file_name}",
+            "media_type": "application/pdf",
+            "bytes_size": 16,
+        },
+    )
+
+
 def test_download_generated_pdf_owner_only(isolated_db) -> None:
     client = _client()
     owner = _register(client, "owner.storage@example.com")
     other = _register(client, "other.storage@example.com")
     file_name = "curriculo-teste.pdf"
+    object_key = user_object_key(str(owner["user_id"]), "outputs", file_name)
     put_bytes(
-        user_object_key(str(owner["user_id"]), "outputs", file_name),
+        object_key,
         b"%PDF-1.4 curriculo",
         "application/pdf",
     )
+    _register_generated_file(owner["user_id"], file_name, object_key=object_key)
 
     response = client.get(f"/users/me/files/{file_name}", headers=owner["auth"])
     assert response.status_code == 200
     assert response.content.startswith(b"%PDF-1.4")
+    assert "/var/lib/fatia" not in response.headers.get("content-disposition", "")
+    assert "https://files.example" not in response.text
 
     denied = client.get(f"/users/me/files/{file_name}", headers=other["auth"])
     assert denied.status_code == 404
+    assert denied.json()["detail"] == "Arquivo nao encontrado"
+    assert b"%PDF" not in denied.content
 
     anonymous = client.get(f"/users/me/files/{file_name}")
     assert anonymous.status_code == 401
@@ -219,6 +241,7 @@ def test_download_uses_s3_stub_when_disk_is_empty(
         file_name = "remoto.pdf"
         key = user_object_key(str(owner["user_id"]), "outputs", file_name)
         put_bytes(key, b"%PDF-1.4 remoto", "application/pdf")
+        _register_generated_file(owner["user_id"], file_name, object_key=key)
 
         response = client.get(f"/users/me/files/{file_name}", headers=owner["auth"])
         assert response.status_code == 200

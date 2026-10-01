@@ -9,6 +9,7 @@ from typing import Any, Iterator
 
 from config import DATABASE_PATH, PERSISTENCE_BACKEND
 from database import mongo_repository
+from database.generated_file_names import cv_download_fields, is_cv_file_name
 
 API_DIR = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = API_DIR / "database" / "schema.sql"
@@ -664,8 +665,66 @@ def list_job_analysis_insights(
             """,
             (user_id, limit, offset),
         ).fetchall()
+        insights = [_insight_row_to_dict(row) for row in rows]
+        cv_names = _cv_file_names_by_run(
+            connection,
+            user_id,
+            [item["processing_run_id"] for item in insights],
+        )
 
-    return [_insight_row_to_dict(row) for row in rows]
+    for item in insights:
+        run_id = item.get("processing_run_id")
+        file_name = None if run_id is None else cv_names.get(str(run_id))
+        item.update(cv_download_fields(file_name))
+    return insights
+
+
+def user_owns_generated_file(user_id: str, file_name: str) -> bool:
+    if _use_mongodb():
+        return mongo_repository.user_owns_generated_file(user_id, file_name)
+
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT 1 AS owned
+            FROM generated_files
+            WHERE user_id = ? AND file_name = ?
+            LIMIT 1
+            """,
+            (user_id, file_name),
+        ).fetchone()
+    return row is not None
+
+
+def _cv_file_names_by_run(
+    connection: sqlite3.Connection,
+    user_id: str,
+    processing_run_ids: list[Any],
+) -> dict[str, str]:
+    run_ids = [run_id for run_id in processing_run_ids if run_id is not None]
+    if not run_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in run_ids)
+    rows = connection.execute(
+        f"""
+        SELECT processing_run_id, file_name
+        FROM generated_files
+        WHERE user_id = ?
+          AND processing_run_id IN ({placeholders})
+        ORDER BY created_at DESC, generated_file_id DESC
+        """,
+        (user_id, *run_ids),
+    ).fetchall()
+    chosen: dict[str, str] = {}
+    for row in rows:
+        key = str(row["processing_run_id"])
+        if key in chosen:
+            continue
+        file_name = row["file_name"]
+        if is_cv_file_name(file_name):
+            chosen[key] = file_name
+    return chosen
 
 
 def create_generated_file(file_data: dict[str, Any]) -> int | str:

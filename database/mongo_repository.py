@@ -4,6 +4,8 @@ import math
 from datetime import UTC, datetime
 from typing import Any
 
+from database.generated_file_names import cv_download_fields, is_cv_file_name
+
 from config import MONGODB_DATABASE, MONGODB_URI
 
 _client: Any | None = None
@@ -379,7 +381,48 @@ def list_job_analysis_insights(
         skip=offset,
         limit=limit,
     )
-    return [_mongo_insight_to_dict(document) for document in documents]
+    insights = [_mongo_insight_to_dict(document) for document in documents]
+    cv_names = _cv_file_names_by_run(
+        user_id,
+        [item.get("processing_run_id") for item in insights],
+    )
+    for item in insights:
+        run_id = item.get("processing_run_id")
+        file_name = None if run_id is None else cv_names.get(str(run_id))
+        item.update(cv_download_fields(file_name))
+    return insights
+
+
+def user_owns_generated_file(user_id: str, file_name: str) -> bool:
+    document = _get_collection("generated_files").find_one(
+        {"user_id": user_id, "file_name": file_name},
+        {"_id": 1},
+    )
+    return document is not None
+
+
+def _cv_file_names_by_run(user_id: str, processing_run_ids: list[Any]) -> dict[str, str]:
+    run_ids = [run_id for run_id in processing_run_ids if run_id is not None]
+    if not run_ids:
+        return {}
+
+    documents = _get_collection("generated_files").find(
+        {
+            "user_id": user_id,
+            "processing_run_id": {"$in": run_ids},
+        },
+        {"_id": 1, "processing_run_id": 1, "file_name": 1},
+        sort=[("created_at", -1), ("_id", -1)],
+    )
+    chosen: dict[str, str] = {}
+    for document in documents:
+        key = str(document.get("processing_run_id"))
+        if key in chosen:
+            continue
+        file_name = document.get("file_name")
+        if is_cv_file_name(file_name):
+            chosen[key] = file_name
+    return chosen
 
 
 def create_generated_file(file_data: dict[str, Any]) -> str:
@@ -791,6 +834,8 @@ def _ensure_indexes(database: Any) -> None:
         unique=True,
     )
     database.generated_files.create_index([("user_id", 1), ("created_at", -1)])
+    database.generated_files.create_index([("user_id", 1), ("processing_run_id", 1)])
+    database.generated_files.create_index([("user_id", 1), ("file_name", 1)])
     database.processar_usage.create_index(
         [("user_id", 1), ("period", 1)],
         unique=True,
