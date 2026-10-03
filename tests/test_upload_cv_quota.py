@@ -629,3 +629,267 @@ def test_m1_pdf_persistido_nao_estorna_cota(isolated_db, monkeypatch):
     assert len(pdfs) == 1
     assert pdfs[0].stat().st_size > 0
     assert _completed_runs(isolated_db, session["user_id"]) == 1
+
+
+EMPTY_CONTEXT_DETAIL = (
+    "Nao foi possivel carregar o contexto do candidato para este usuario. "
+    "Verifique o upload do curriculo e regenere os embeddings."
+)
+_CONTEXT_OK = "Ana Silva, desenvolvedora Python"
+
+
+def _set_usage(db_path: Path, user_id: str, *, used: int, refunds: int) -> None:
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO processar_usage (user_id, period, used, refunds, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, period) DO UPDATE SET
+                used = excluded.used,
+                refunds = excluded.refunds,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                current_usage_period(),
+                used,
+                refunds,
+                "2026-10-03T00:00:00+00:00",
+            ),
+        )
+
+
+def _chat_stub():
+    return sys.modules["services.main_chat"]
+
+
+def _bind_pipeline(monkeypatch, pipeline) -> None:
+    monkeypatch.setattr(_chat_stub(), "pipeline_with_details", pipeline)
+    monkeypatch.setattr("main.pipeline_with_details", pipeline)
+
+
+def _bind_context_loader(monkeypatch, loader) -> None:
+    monkeypatch.setattr(_chat_stub(), "load_candidate_context", loader, raising=False)
+
+
+def test_b7_pipeline_empty_context_restores_quota_past_refund_cap(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "b7.pipeline-empty@example.com")
+    _mark_embeddings(session["user_id"])
+    _set_usage(
+        isolated_db,
+        session["user_id"],
+        used=2,
+        refunds=PROCESSAR_REFUND_LIMIT,
+    )
+    pipeline = MagicMock(
+        side_effect=HTTPException(status_code=400, detail=EMPTY_CONTEXT_DETAIL),
+    )
+    monkeypatch.setattr("main.pipeline_with_details", pipeline)
+
+    for _ in range(PROCESSAR_REFUND_LIMIT + 1):
+        response = client.post(
+            "/processar",
+            headers=session["auth"],
+            json={"texto": "Vaga com contexto vazio"},
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == EMPTY_CONTEXT_DETAIL
+        assert _usage(session["user_id"]) == 2
+        assert _refunds(isolated_db, session["user_id"]) == PROCESSAR_REFUND_LIMIT
+
+    assert pipeline.call_count == PROCESSAR_REFUND_LIMIT + 1
+
+    pipeline.side_effect = None
+    pipeline.return_value = {
+        "resposta_usuario": "Analise ok",
+        "match_score": 80,
+        "should_generate_curriculum": False,
+        "vaga": {"cargo": "Dev"},
+        "matching": {"pontos_fortes": ["Python"]},
+        "otimizacao": {},
+    }
+    success = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga para analista de dados"},
+    )
+    assert success.status_code == 200
+    assert _usage(session["user_id"]) == 3
+    assert _refunds(isolated_db, session["user_id"]) == PROCESSAR_REFUND_LIMIT
+
+    pipeline.side_effect = TimeoutError("openai timeout")
+    capped = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga com timeout acima do teto"},
+    )
+    assert capped.status_code == 500
+    assert _usage(session["user_id"]) == 4
+    assert _refunds(isolated_db, session["user_id"]) == PROCESSAR_REFUND_LIMIT
+
+
+def test_b7_empty_context_before_reservation_does_not_debit(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "b7.preload-empty@example.com")
+    _mark_embeddings(session["user_id"])
+    _set_usage(
+        isolated_db,
+        session["user_id"],
+        used=2,
+        refunds=PROCESSAR_REFUND_LIMIT,
+    )
+    pipeline = _pipeline_ok()
+    _bind_pipeline(monkeypatch, pipeline)
+
+    def empty_context(_texto: str, _user_id: str) -> str:
+        raise HTTPException(status_code=400, detail=EMPTY_CONTEXT_DETAIL)
+
+    _bind_context_loader(monkeypatch, empty_context)
+
+    for _ in range(PROCESSAR_REFUND_LIMIT + 1):
+        response = client.post(
+            "/processar",
+            headers=session["auth"],
+            json={"texto": "Vaga sem contexto util"},
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == EMPTY_CONTEXT_DETAIL
+        assert _usage(session["user_id"]) == 2
+        assert _refunds(isolated_db, session["user_id"]) == PROCESSAR_REFUND_LIMIT
+
+    assert pipeline.call_count == 0
+
+    _bind_context_loader(monkeypatch, lambda _texto, _user_id: _CONTEXT_OK)
+    success = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga para analista de dados"},
+    )
+    assert success.status_code == 200
+    assert _usage(session["user_id"]) == 3
+    assert _refunds(isolated_db, session["user_id"]) == PROCESSAR_REFUND_LIMIT
+    assert pipeline.call_count == 1
+    assert pipeline.call_args.kwargs["contexto"] == _CONTEXT_OK
+
+
+def test_b7_parse_failure_still_debits_when_context_loads(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "b7.parse@example.com")
+    _mark_embeddings(session["user_id"])
+    _set_usage(isolated_db, session["user_id"], used=1, refunds=0)
+    pipeline = MagicMock(side_effect=OutputParserException("nao responda em JSON"))
+    _bind_pipeline(monkeypatch, pipeline)
+    _bind_context_loader(monkeypatch, lambda _texto, _user_id: _CONTEXT_OK)
+
+    response = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga: nao responda em JSON"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == _PARSE_DETAIL
+    assert _usage(session["user_id"]) == 2
+    assert _refunds(isolated_db, session["user_id"]) == 0
+    assert pipeline.call_count == 1
+
+
+def test_b7_provider_refund_cap_unchanged_when_context_loads(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "b7.provider-cap@example.com")
+    _mark_embeddings(session["user_id"])
+    _set_usage(
+        isolated_db,
+        session["user_id"],
+        used=1,
+        refunds=PROCESSAR_REFUND_LIMIT,
+    )
+    pipeline = MagicMock(side_effect=TimeoutError("openai timeout"))
+    _bind_pipeline(monkeypatch, pipeline)
+    _bind_context_loader(monkeypatch, lambda _texto, _user_id: _CONTEXT_OK)
+
+    response = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga com timeout do provedor"},
+    )
+    assert response.status_code == 500
+    assert "openai timeout" not in response.text
+    assert _usage(session["user_id"]) == 2
+    assert _refunds(isolated_db, session["user_id"]) == PROCESSAR_REFUND_LIMIT
+
+
+def test_b7_context_loader_provider_error_still_refunds_within_cap(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "b7.loader-timeout@example.com")
+    _mark_embeddings(session["user_id"])
+    _set_usage(isolated_db, session["user_id"], used=1, refunds=0)
+    pipeline = _pipeline_ok()
+    _bind_pipeline(monkeypatch, pipeline)
+
+    def timeout(_texto: str, _user_id: str) -> str:
+        raise TimeoutError("openai timeout")
+
+    _bind_context_loader(monkeypatch, timeout)
+
+    response = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga com timeout ao carregar contexto"},
+    )
+    assert response.status_code == 500
+    assert "openai timeout" not in response.text
+    assert _usage(session["user_id"]) == 1
+    assert _refunds(isolated_db, session["user_id"]) == 1
+    assert pipeline.call_count == 0
+
+
+def test_b7_other_pipeline_400_still_debits(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "b7.other-400@example.com")
+    _mark_embeddings(session["user_id"])
+    _set_usage(isolated_db, session["user_id"], used=1, refunds=0)
+    pipeline = MagicMock(
+        side_effect=HTTPException(status_code=400, detail=NOT_READY_DETAIL),
+    )
+    monkeypatch.setattr("main.pipeline_with_details", pipeline)
+
+    response = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga com outro 400"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == NOT_READY_DETAIL
+    assert _usage(session["user_id"]) == 2
+    assert _refunds(isolated_db, session["user_id"]) == 0
+
+
+def test_b7_exhausted_quota_stays_402_before_context_load(isolated_db, monkeypatch):
+    client = _client()
+    session = _register(client, "b7.exhausted@example.com")
+    _mark_embeddings(session["user_id"])
+    _set_usage(
+        isolated_db,
+        session["user_id"],
+        used=5,
+        refunds=PROCESSAR_REFUND_LIMIT,
+    )
+    pipeline = MagicMock(side_effect=AssertionError("pipeline nao deveria rodar"))
+    _bind_pipeline(monkeypatch, pipeline)
+
+    def loader(_texto: str, _user_id: str) -> str:
+        raise AssertionError("contexto nao deveria ser carregado")
+
+    _bind_context_loader(monkeypatch, loader)
+
+    response = client.post(
+        "/processar",
+        headers=session["auth"],
+        json={"texto": "Vaga alem da cota"},
+    )
+    assert response.status_code == 402
+    assert response.json()["detail"]["code"] == "SUBSCRIPTION_REQUIRED"
+    assert _usage(session["user_id"]) == 5
+    assert _refunds(isolated_db, session["user_id"]) == PROCESSAR_REFUND_LIMIT
+    assert pipeline.call_count == 0
