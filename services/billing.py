@@ -16,6 +16,7 @@ from database.repository import (
     consume_processar_usage,
     get_processar_usage,
     release_processar_usage,
+    revert_processar_usage,
     get_user_by_id,
     get_user_by_stripe_customer_id,
     get_user_by_stripe_subscription_id,
@@ -100,6 +101,25 @@ def release_processar_quota(user_id: str, *, period: str | None = None) -> dict[
         entitlement["user_id"],
         period=usage_period,
         refund_limit=PROCESSAR_REFUND_LIMIT,
+    )
+    entitlement["period"] = usage_period
+    entitlement["used"] = int(result["used"])
+    entitlement["remaining"] = max(0, entitlement["limit"] - entitlement["used"])
+    return entitlement
+
+
+def revert_processar_reservation(user_id: str, *, period: str | None = None) -> dict[str, Any]:
+    """Undo one consume without counting it as a provider/infra refund.
+
+    The monthly refund cap does not apply and the refunds counter is left
+    unchanged. Use this only when a reservation must not stand, such as
+    POST /processar rejected because the candidate context is empty.
+    """
+    entitlement = get_entitlement(user_id)
+    usage_period = period or entitlement["period"]
+    result = revert_processar_usage(
+        entitlement["user_id"],
+        period=usage_period,
     )
     entitlement["period"] = usage_period
     entitlement["used"] = int(result["used"])

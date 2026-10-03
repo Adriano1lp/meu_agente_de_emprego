@@ -67,6 +67,7 @@ from services.billing import (
     get_entitlement,
     handle_stripe_webhook,
     release_processar_quota,
+    revert_processar_reservation,
 )
 from services.legal import get_legal_markdown
 from services.development_plan import (
@@ -104,6 +105,10 @@ _PROCESSAR_PARSE_FAILURE_DETAIL = (
     "Ajuste o texto e tente novamente."
 )
 _PROCESSAR_INTERNAL_DETAIL = "Erro interno ao processar a vaga"
+_EMPTY_CANDIDATE_CONTEXT_DETAIL = (
+    "Nao foi possivel carregar o contexto do candidato para este usuario. "
+    "Verifique o upload do curriculo e regenere os embeddings."
+)
 _INPUT_EXCEPTION_NAMES = frozenset({"OutputParserException"})
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
@@ -739,12 +744,27 @@ def processar(
     if not _user_has_embeddings(user_id):
         raise HTTPException(status_code=400, detail=_MISSING_EMBEDDINGS_DETAIL)
 
+    if int(get_entitlement(user_id)["remaining"]) <= 0:
+        consume_processar_quota(user_id)
+
+    preloaded_context, deferred_error = _probe_candidate_context(texto_entrada, user_id)
+
     reservation = consume_processar_quota(user_id)
     quota_period = str(reservation["period"])
     quota_reserved = True
     refund_quota = False
+    undo_reservation = False
     try:
-        pipeline_result = pipeline_with_details(texto_entrada, user_id)
+        if deferred_error is not None:
+            raise deferred_error
+        if preloaded_context is None:
+            pipeline_result = pipeline_with_details(texto_entrada, user_id)
+        else:
+            pipeline_result = pipeline_with_details(
+                texto_entrada,
+                user_id,
+                contexto=preloaded_context,
+            )
         resposta_usuario = str(pipeline_result["resposta_usuario"])
         match_score = _safe_int(pipeline_result.get("match_score"))
 
@@ -838,7 +858,9 @@ def processar(
             }
         quota_reserved = False
         return response
-    except HTTPException:
+    except HTTPException as exc:
+        if quota_reserved and _is_empty_candidate_context(exc):
+            undo_reservation = True
         raise
     except Exception as exc:
         if _processar_failure_kind(exc) == "provider":
@@ -866,7 +888,9 @@ def processar(
             detail=_PROCESSAR_INTERNAL_DETAIL,
         ) from exc
     finally:
-        if quota_reserved and refund_quota:
+        if quota_reserved and undo_reservation:
+            _revert_processar_reservation_quietly(user_id, quota_period)
+        elif quota_reserved and refund_quota:
             _release_processar_quota_quietly(user_id, quota_period)
 
 
@@ -1088,6 +1112,68 @@ def _release_processar_quota_quietly(user_id: str, period: str) -> None:
             "Falha ao estornar cota de processar error_type=%s",
             type(exc).__name__,
         )
+
+
+def _revert_processar_reservation_quietly(user_id: str, period: str) -> None:
+    try:
+        revert_processar_reservation(user_id, period=period)
+    except Exception as exc:
+        logger.error(
+            "Falha ao reverter reserva de cota de processar error_type=%s",
+            type(exc).__name__,
+        )
+
+
+def _empty_candidate_context_detail() -> str:
+    import services.main_chat as main_chat
+
+    detail = getattr(main_chat, "EMPTY_CANDIDATE_CONTEXT_DETAIL", None)
+    if isinstance(detail, str) and detail.strip():
+        return detail
+    return _EMPTY_CANDIDATE_CONTEXT_DETAIL
+
+
+def _is_empty_candidate_context(exc: HTTPException) -> bool:
+    return exc.status_code == 400 and exc.detail == _empty_candidate_context_detail()
+
+
+def _should_preload_candidate_context() -> bool:
+    import services.main_chat as main_chat
+
+    loader = getattr(main_chat, "load_candidate_context", None)
+    real_pipeline = getattr(main_chat, "pipeline_with_details", None)
+    if not callable(loader) or not callable(real_pipeline):
+        return False
+    return pipeline_with_details is real_pipeline
+
+
+def _probe_candidate_context(
+    texto: str,
+    user_id: str,
+) -> tuple[str | None, BaseException | None]:
+    """Load context before reserving quota when the real pipeline is in use.
+
+    An empty-context HTTP 400 propagates so the caller does not debit.
+    Any other loader failure is returned and replayed after the reservation,
+    so provider refunds and parse debits stay on the existing path.
+    """
+    if not _should_preload_candidate_context():
+        return None, None
+
+    import services.main_chat as main_chat
+
+    try:
+        context = main_chat.load_candidate_context(texto, user_id)
+    except HTTPException as exc:
+        if _is_empty_candidate_context(exc):
+            raise
+        return None, exc
+    except Exception as exc:
+        return None, exc
+
+    if not isinstance(context, str) or not context.strip():
+        raise HTTPException(status_code=400, detail=_empty_candidate_context_detail())
+    return context, None
 
 
 def _read_owned_generated_pdf(user_id: str, file_name: str) -> bytes | None:

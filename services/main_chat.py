@@ -23,6 +23,10 @@ from database.repository import find_similar_embedding_chunks, get_latest_user_c
 
 OPENAI_API_KEY = ensure_openai_api_key()
 MINIMUM_MATCH_SCORE_TO_GENERATE_CURRICULUM = 60
+EMPTY_CANDIDATE_CONTEXT_DETAIL = (
+    "Nao foi possivel carregar o contexto do candidato para este usuario. "
+    "Verifique o upload do curriculo e regenere os embeddings."
+)
 FUSO_CARTA = ZoneInfo("America/Sao_Paulo")
 _MESES_PT_BR = (
     "janeiro",
@@ -411,8 +415,14 @@ def pipeline(vaga_texto: str, user_id: str) -> tuple[str, str]:
     return str(result.get("curriculo") or ""), str(result["resposta_usuario"])
 
 
-def pipeline_with_details(vaga_texto: str, user_id: str) -> dict[str, object]:
-    contexto = _load_candidate_context(vaga_texto, user_id)
+def pipeline_with_details(
+    vaga_texto: str,
+    user_id: str,
+    *,
+    contexto: str | None = None,
+) -> dict[str, object]:
+    if contexto is None or not str(contexto).strip():
+        contexto = _load_candidate_context(vaga_texto, user_id)
 
     vaga_struct = cadeia_1.invoke({"vaga": vaga_texto})
     matching = cadeia_2.invoke({"contexto": contexto, "vaga": vaga_struct})
@@ -490,6 +500,10 @@ def generate_cover_letter(company_name: str, user_id: str) -> str:
     return aplicar_data_na_carta(str(carta), data)
 
 
+def load_candidate_context(vaga_texto: str, user_id: str) -> str:
+    return _load_candidate_context(vaga_texto, user_id)
+
+
 def _load_candidate_context(vaga_texto: str, user_id: str) -> str:
     context_parts: list[str] = []
     if _use_mongodb_embeddings():
@@ -525,10 +539,7 @@ def _load_candidate_context(vaga_texto: str, user_id: str) -> str:
     if not contexto:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Nao foi possivel carregar o contexto do candidato para este usuario. "
-                "Verifique o upload do curriculo e regenere os embeddings."
-            ),
+            detail=EMPTY_CANDIDATE_CONTEXT_DETAIL,
         )
 
     return contexto
