@@ -264,6 +264,45 @@ def test_release_processar_quota_decrements_once_and_stops_at_zero(isolated_db):
     assert get_processar_usage(user_id, period) == 0
 
 
+def test_revert_processar_reservation_ignores_refund_cap(isolated_db):
+    import sqlite3
+
+    from services.billing import revert_processar_reservation
+
+    client = _client()
+    session = _register(client, "billing.revert-cap@example.com")
+    user_id = session["user_id"]
+    period = current_usage_period()
+    consume_processar_quota(user_id)
+    consume_processar_quota(user_id)
+    with sqlite3.connect(isolated_db) as connection:
+        connection.execute(
+            """
+            UPDATE processar_usage
+            SET refunds = 3
+            WHERE user_id = ? AND period = ?
+            """,
+            (user_id, period),
+        )
+
+    revert_processar_reservation(user_id, period=period)
+    assert get_processar_usage(user_id, period) == 1
+    revert_processar_reservation(user_id, period=period)
+    assert get_processar_usage(user_id, period) == 0
+    revert_processar_reservation(user_id, period=period)
+    assert get_processar_usage(user_id, period) == 0
+    with sqlite3.connect(isolated_db) as connection:
+        refunds = connection.execute(
+            """
+            SELECT refunds
+            FROM processar_usage
+            WHERE user_id = ? AND period = ?
+            """,
+            (user_id, period),
+        ).fetchone()[0]
+    assert int(refunds) == 3
+
+
 def test_checkout_requires_auth_and_consent(isolated_db):
     client = _client()
     assert client.post("/billing/checkout").status_code == 401
