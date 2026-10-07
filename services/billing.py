@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
-import time
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,12 +14,17 @@ from database.repository import (
     consume_processar_usage,
     get_processar_usage,
     release_processar_usage,
+    release_stripe_webhook_event,
     revert_processar_usage,
     get_user_by_id,
     get_user_by_stripe_customer_id,
     get_user_by_stripe_subscription_id,
     update_user_billing,
 )
+
+logger = logging.getLogger(__name__)
+
+_CHECKOUT_ACTIVATE_PAYMENT_STATUSES = frozenset({"paid", "no_payment_required"})
 
 PLAN_FREE = "free"
 PLAN_ESSENCIAL = "essencial"
@@ -179,28 +182,28 @@ def handle_stripe_webhook(payload: bytes, signature_header: str | None) -> dict[
     if not signature_header:
         raise HTTPException(status_code=400, detail="Assinatura Stripe ausente")
 
-    _verify_stripe_signature(payload, signature_header, secret)
-    try:
-        event = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail="Payload Stripe invalido") from exc
-
+    event = _parse_verified_stripe_event(payload, signature_header, secret)
     event_id = str(event.get("id") or "")
     event_type = str(event.get("type") or "")
     if event_id and not claim_stripe_webhook_event(event_id, event_type):
         return {"received": True, "duplicate": True, "type": event_type}
 
-    data_object = _as_dict((event.get("data") or {}).get("object"))
-    if event_type == "checkout.session.completed":
-        _apply_checkout_session(data_object)
-    elif event_type == "customer.subscription.updated":
-        _apply_subscription_object(data_object)
-    elif event_type == "customer.subscription.deleted":
-        _apply_subscription_deleted(data_object)
-    elif event_type == "invoice.paid":
-        _apply_invoice_paid(data_object)
-    elif event_type == "invoice.payment_failed":
-        _apply_invoice_payment_failed(data_object)
+    try:
+        data_object = _as_dict((event.get("data") or {}).get("object"))
+        _dispatch_stripe_event(event_type, data_object, event_id=event_id)
+    except Exception as exc:
+        if event_id:
+            _release_stripe_webhook_claim(event_id, event_type)
+        logger.error(
+            "Falha ao aplicar evento Stripe event_id=%s event_type=%s error_type=%s",
+            event_id,
+            event_type,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Falha ao processar evento Stripe",
+        ) from None
 
     return {"received": True, "type": event_type}
 
@@ -224,15 +227,80 @@ def _quota_denied_body(*, entitlement: dict[str, Any], used: int) -> dict[str, A
     }
 
 
-def _apply_checkout_session(session: dict[str, Any]) -> None:
-    user = _resolve_user(
-        user_id=str(
-            (session.get("metadata") or {}).get("user_id")
-            or session.get("client_reference_id")
-            or ""
-        ),
+def _dispatch_stripe_event(
+    event_type: str,
+    data_object: dict[str, Any],
+    *,
+    event_id: str,
+) -> None:
+    if event_type == "checkout.session.completed":
+        _apply_checkout_session_completed(
+            data_object,
+            event_id=event_id,
+            event_type=event_type,
+        )
+    elif event_type == "checkout.session.async_payment_succeeded":
+        _apply_checkout_session_paid(
+            data_object,
+            event_id=event_id,
+            event_type=event_type,
+        )
+    elif event_type == "checkout.session.async_payment_failed":
+        _apply_checkout_async_payment_failed(
+            data_object,
+            event_id=event_id,
+            event_type=event_type,
+        )
+    elif event_type == "customer.subscription.updated":
+        _apply_subscription_object(
+            data_object,
+            event_id=event_id,
+            event_type=event_type,
+        )
+    elif event_type == "customer.subscription.deleted":
+        _apply_subscription_deleted(
+            data_object,
+            event_id=event_id,
+            event_type=event_type,
+        )
+    elif event_type == "invoice.paid":
+        _apply_invoice_paid(
+            data_object,
+            event_id=event_id,
+            event_type=event_type,
+        )
+    elif event_type == "invoice.payment_failed":
+        _apply_invoice_payment_failed(
+            data_object,
+            event_id=event_id,
+            event_type=event_type,
+        )
+
+
+def _apply_checkout_session_completed(
+    session: dict[str, Any],
+    *,
+    event_id: str,
+    event_type: str,
+) -> None:
+    payment_status = str(session.get("payment_status") or "").strip().lower()
+    if payment_status not in _CHECKOUT_ACTIVATE_PAYMENT_STATUSES:
+        return
+    _apply_checkout_session_paid(session, event_id=event_id, event_type=event_type)
+
+
+def _apply_checkout_session_paid(
+    session: dict[str, Any],
+    *,
+    event_id: str,
+    event_type: str,
+) -> None:
+    user = _resolve_event_user(
+        user_id=_checkout_reference_user_id(session),
         customer_id=_as_id(session.get("customer")),
         subscription_id=_as_id(session.get("subscription")),
+        event_id=event_id,
+        event_type=event_type,
     )
     if not user:
         return
@@ -245,11 +313,51 @@ def _apply_checkout_session(session: dict[str, Any]) -> None:
     )
 
 
-def _apply_subscription_object(subscription: dict[str, Any]) -> None:
-    user = _resolve_user(
+def _apply_checkout_async_payment_failed(
+    session: dict[str, Any],
+    *,
+    event_id: str,
+    event_type: str,
+) -> None:
+    user = _resolve_event_user(
+        user_id=_checkout_reference_user_id(session),
+        customer_id=_as_id(session.get("customer")),
+        subscription_id=_as_id(session.get("subscription")),
+        event_id=event_id,
+        event_type=event_type,
+    )
+    if not user:
+        return
+    session_subscription_id = _as_id(session.get("subscription"))
+    current_subscription_id = str(user.get("stripe_subscription_id") or "").strip()
+    current_status = str(user.get("subscription_status") or "")
+    if (
+        session_subscription_id
+        and current_subscription_id == session_subscription_id
+        and current_status == SUBSCRIPTION_ACTIVE
+    ):
+        _write_billing(
+            user_id=user["user_id"],
+            stripe_customer_id=_as_id(session.get("customer")),
+            stripe_subscription_id=None,
+            plan=PLAN_FREE,
+            subscription_status=SUBSCRIPTION_CANCELED,
+            clear_subscription_id=True,
+        )
+
+
+def _apply_subscription_object(
+    subscription: dict[str, Any],
+    *,
+    event_id: str,
+    event_type: str,
+) -> None:
+    user = _resolve_event_user(
         user_id=str((subscription.get("metadata") or {}).get("user_id") or ""),
         customer_id=_as_id(subscription.get("customer")),
         subscription_id=_as_id(subscription.get("id")),
+        event_id=event_id,
+        event_type=event_type,
     )
     if not user:
         return
@@ -265,11 +373,18 @@ def _apply_subscription_object(subscription: dict[str, Any]) -> None:
     )
 
 
-def _apply_subscription_deleted(subscription: dict[str, Any]) -> None:
-    user = _resolve_user(
+def _apply_subscription_deleted(
+    subscription: dict[str, Any],
+    *,
+    event_id: str,
+    event_type: str,
+) -> None:
+    user = _resolve_event_user(
         user_id=str((subscription.get("metadata") or {}).get("user_id") or ""),
         customer_id=_as_id(subscription.get("customer")),
         subscription_id=_as_id(subscription.get("id")),
+        event_id=event_id,
+        event_type=event_type,
     )
     if not user:
         return
@@ -283,11 +398,18 @@ def _apply_subscription_deleted(subscription: dict[str, Any]) -> None:
     )
 
 
-def _apply_invoice_paid(invoice: dict[str, Any]) -> None:
-    user = _resolve_user(
+def _apply_invoice_paid(
+    invoice: dict[str, Any],
+    *,
+    event_id: str,
+    event_type: str,
+) -> None:
+    user = _resolve_event_user(
         user_id=str((invoice.get("metadata") or {}).get("user_id") or ""),
         customer_id=_as_id(invoice.get("customer")),
         subscription_id=_as_id(invoice.get("subscription")),
+        event_id=event_id,
+        event_type=event_type,
     )
     if not user:
         return
@@ -300,11 +422,18 @@ def _apply_invoice_paid(invoice: dict[str, Any]) -> None:
     )
 
 
-def _apply_invoice_payment_failed(invoice: dict[str, Any]) -> None:
-    user = _resolve_user(
+def _apply_invoice_payment_failed(
+    invoice: dict[str, Any],
+    *,
+    event_id: str,
+    event_type: str,
+) -> None:
+    user = _resolve_event_user(
         user_id=str((invoice.get("metadata") or {}).get("user_id") or ""),
         customer_id=_as_id(invoice.get("customer")),
         subscription_id=_as_id(invoice.get("subscription")),
+        event_id=event_id,
+        event_type=event_type,
     )
     if not user:
         return
@@ -350,6 +479,33 @@ def _resolve_user(
     return None
 
 
+def _resolve_event_user(
+    *,
+    user_id: str,
+    customer_id: str | None,
+    subscription_id: str | None,
+    event_id: str,
+    event_type: str,
+) -> dict[str, Any] | None:
+    user = _resolve_user(
+        user_id=user_id,
+        customer_id=customer_id,
+        subscription_id=subscription_id,
+    )
+    if not user:
+        logger.warning(
+            "Usuario do evento Stripe nao encontrado event_id=%s event_type=%s",
+            event_id,
+            event_type,
+        )
+    return user
+
+
+def _checkout_reference_user_id(session: dict[str, Any]) -> str:
+    metadata = session.get("metadata") or {}
+    return str(metadata.get("user_id") or session.get("client_reference_id") or "")
+
+
 def _write_billing(
     *,
     user_id: str,
@@ -383,33 +539,56 @@ def _create_stripe_checkout_session(**kwargs: Any) -> Any:
     return stripe.checkout.Session.create(**kwargs)
 
 
-def _verify_stripe_signature(payload: bytes, signature_header: str, secret: str) -> None:
-    timestamp, provided_signature = _parse_stripe_signature(signature_header)
-    tolerance = max(0, int(app_config.STRIPE_WEBHOOK_TOLERANCE_SECONDS))
-    if abs(int(time.time()) - timestamp) > tolerance:
-        raise HTTPException(status_code=400, detail="Assinatura Stripe expirada")
-
-    signed_payload = f"{timestamp}.".encode("utf-8") + payload
-    expected = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, provided_signature):
-        raise HTTPException(status_code=400, detail="Assinatura Stripe invalida")
-
-
-def _parse_stripe_signature(header: str) -> tuple[int, str]:
-    timestamp = None
-    signature = None
-    for item in header.split(","):
-        key, _, value = item.strip().partition("=")
-        if key == "t":
-            timestamp = value
-        elif key == "v1" and signature is None:
-            signature = value
-    if timestamp is None or signature is None:
-        raise HTTPException(status_code=400, detail="Assinatura Stripe invalida")
+def _parse_verified_stripe_event(
+    payload: bytes,
+    signature_header: str,
+    secret: str,
+) -> dict[str, Any]:
     try:
-        return int(timestamp), signature
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Assinatura Stripe invalida") from exc
+        import stripe
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Dependencia stripe nao instalada",
+        ) from exc
+
+    tolerance = max(0, int(app_config.STRIPE_WEBHOOK_TOLERANCE_SECONDS))
+    try:
+        stripe.Webhook.construct_event(
+            payload,
+            signature_header,
+            secret,
+            tolerance=tolerance,
+        )
+    except stripe.SignatureVerificationError as exc:
+        detail = (
+            "Assinatura Stripe expirada"
+            if "tolerance" in str(exc).lower()
+            else "Assinatura Stripe invalida"
+        )
+        raise HTTPException(status_code=400, detail=detail) from None
+    except (UnicodeDecodeError, ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="Payload Stripe invalido") from None
+
+    try:
+        event = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Payload Stripe invalido") from None
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=400, detail="Payload Stripe invalido")
+    return event
+
+
+def _release_stripe_webhook_claim(event_id: str, event_type: str) -> None:
+    try:
+        release_stripe_webhook_event(event_id)
+    except Exception as exc:
+        logger.error(
+            "Falha ao liberar claim do evento Stripe event_id=%s event_type=%s error_type=%s",
+            event_id,
+            event_type,
+            type(exc).__name__,
+        )
 
 
 def _as_dict(value: Any) -> dict[str, Any]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import sys
 import time
 from types import ModuleType
@@ -103,14 +104,46 @@ def _register(client, email: str) -> dict:
     }
 
 
-def _sign_stripe_payload(payload: bytes, secret: str = "whsec_test") -> dict[str, str]:
-    timestamp = str(int(time.time()))
+def _sign_stripe_payload(
+    payload: bytes,
+    secret: str = "whsec_test",
+    *,
+    timestamp: str | None = None,
+) -> dict[str, str]:
+    signed_at = timestamp if timestamp is not None else str(int(time.time()))
     digest = hmac.new(
         secret.encode("utf-8"),
-        f"{timestamp}.".encode("utf-8") + payload,
+        f"{signed_at}.".encode("utf-8") + payload,
         hashlib.sha256,
     ).hexdigest()
-    return {"Stripe-Signature": f"t={timestamp},v1={digest}"}
+    return {"Stripe-Signature": f"t={signed_at},v1={digest}"}
+
+
+def _stripe_event(event_id: str, event_type: str, obj: dict) -> bytes:
+    return json.dumps(
+        {"id": event_id, "type": event_type, "data": {"object": obj}}
+    ).encode()
+
+
+def _post_webhook(client, payload: bytes, headers: dict[str, str] | None = None):
+    signed = headers if headers is not None else _sign_stripe_payload(payload)
+    return client.post(
+        "/billing/webhook",
+        content=payload,
+        headers={**signed, "Content-Type": "application/json"},
+    )
+
+
+def _checkout_session_object(user_id: str, **overrides) -> dict:
+    session = {
+        "client_reference_id": user_id,
+        "customer": "cus_checkout_test",
+        "subscription": "sub_checkout_test",
+        "payment_status": "paid",
+        "metadata": {"user_id": user_id, "plan": "essencial"},
+    }
+    session.update(overrides)
+    return session
 
 
 def _activate_essencial(user_id: str) -> None:
@@ -407,6 +440,7 @@ def test_webhook_activates_essencial_and_is_idempotent(isolated_db, monkeypatch)
                     "client_reference_id": session["user_id"],
                     "customer": "cus_test_123",
                     "subscription": "sub_test_123",
+                    "payment_status": "paid",
                     "metadata": {"user_id": session["user_id"], "plan": "essencial"},
                 }
             },
@@ -492,6 +526,287 @@ def test_invoice_payment_failed_marks_past_due(isolated_db, monkeypatch):
     user = get_user_by_id(session["user_id"])
     assert user["subscription_status"] == "past_due"
     assert get_entitlement(session["user_id"])["limit"] == 5
+
+
+def test_webhook_failure_releases_claim_and_retry_applies(isolated_db, monkeypatch):
+    monkeypatch.setattr("config.STRIPE_WEBHOOK_SECRET", "whsec_test")
+    client = _client()
+    session = _register(client, "billing.retry-fail@example.com")
+    payload = _stripe_event(
+        "evt_retry_after_fail",
+        "checkout.session.completed",
+        _checkout_session_object(
+            session["user_id"],
+            customer="cus_retry",
+            subscription="sub_retry",
+        ),
+    )
+    calls = {"n": 0}
+    original = update_user_billing
+
+    def flaky_update(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("billing write failed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr("services.billing.update_user_billing", flaky_update)
+
+    first = _post_webhook(client, payload)
+    assert first.status_code == 500
+    assert "billing write failed" not in first.text
+    user = get_user_by_id(session["user_id"])
+    assert user["plan"] == "free"
+    assert user["subscription_status"] == "none"
+
+    second = _post_webhook(client, payload)
+    assert second.status_code == 200
+    assert second.json().get("duplicate") is not True
+    user = get_user_by_id(session["user_id"])
+    assert user["plan"] == "essencial"
+    assert user["subscription_status"] == "active"
+    assert user["stripe_subscription_id"] == "sub_retry"
+
+    third = _post_webhook(client, payload)
+    assert third.status_code == 200
+    assert third.json()["duplicate"] is True
+    assert get_user_by_id(session["user_id"])["stripe_subscription_id"] == "sub_retry"
+
+
+def test_checkout_unpaid_does_not_activate(isolated_db, monkeypatch):
+    monkeypatch.setattr("config.STRIPE_WEBHOOK_SECRET", "whsec_test")
+    client = _client()
+    unpaid = _register(client, "billing.unpaid@example.com")
+    allowed = _register(client, "billing.no-payment@example.com")
+
+    unpaid_payload = _stripe_event(
+        "evt_checkout_unpaid",
+        "checkout.session.completed",
+        _checkout_session_object(
+            unpaid["user_id"],
+            customer="cus_unpaid",
+            subscription="sub_unpaid",
+            payment_status="unpaid",
+        ),
+    )
+    first = _post_webhook(client, unpaid_payload)
+    assert first.status_code == 200
+    assert first.json().get("duplicate") is not True
+    user = get_user_by_id(unpaid["user_id"])
+    assert user["plan"] == "free"
+    assert user["subscription_status"] == "none"
+    assert user["stripe_subscription_id"] in {None, ""}
+
+    second = _post_webhook(client, unpaid_payload)
+    assert second.status_code == 200
+    assert second.json()["duplicate"] is True
+    assert get_user_by_id(unpaid["user_id"])["plan"] == "free"
+
+    allowed_payload = _stripe_event(
+        "evt_checkout_no_payment_required",
+        "checkout.session.completed",
+        _checkout_session_object(
+            allowed["user_id"],
+            customer="cus_nopay",
+            subscription="sub_nopay",
+            payment_status="no_payment_required",
+        ),
+    )
+    activated = _post_webhook(client, allowed_payload)
+    assert activated.status_code == 200
+    allowed_user = get_user_by_id(allowed["user_id"])
+    assert allowed_user["plan"] == "essencial"
+    assert allowed_user["subscription_status"] == "active"
+
+
+def test_async_payment_succeeded_activates_and_failed_does_not(isolated_db, monkeypatch):
+    monkeypatch.setattr("config.STRIPE_WEBHOOK_SECRET", "whsec_test")
+    client = _client()
+    succeeded = _register(client, "billing.async-ok@example.com")
+    failed = _register(client, "billing.async-fail@example.com")
+    same_session = _register(client, "billing.async-revoke@example.com")
+    other_subscription = _register(client, "billing.async-other@example.com")
+    _activate_essencial(same_session["user_id"])
+    update_user_billing(
+        other_subscription["user_id"],
+        plan="essencial",
+        subscription_status="active",
+        stripe_customer_id="cus_other",
+        stripe_subscription_id="sub_other_live",
+        updated_at="2026-09-01T00:00:00+00:00",
+    )
+
+    success_payload = _stripe_event(
+        "evt_async_succeeded",
+        "checkout.session.async_payment_succeeded",
+        _checkout_session_object(
+            succeeded["user_id"],
+            customer="cus_async_ok",
+            subscription="sub_async_ok",
+            payment_status="paid",
+        ),
+    )
+    success = _post_webhook(client, success_payload)
+    assert success.status_code == 200
+    success_user = get_user_by_id(succeeded["user_id"])
+    assert success_user["plan"] == "essencial"
+    assert success_user["subscription_status"] == "active"
+    assert success_user["stripe_subscription_id"] == "sub_async_ok"
+
+    failed_payload = _stripe_event(
+        "evt_async_failed",
+        "checkout.session.async_payment_failed",
+        _checkout_session_object(
+            failed["user_id"],
+            customer="cus_async_fail",
+            subscription="sub_async_fail",
+            payment_status="unpaid",
+        ),
+    )
+    failed_response = _post_webhook(client, failed_payload)
+    assert failed_response.status_code == 200
+    failed_user = get_user_by_id(failed["user_id"])
+    assert failed_user["plan"] == "free"
+    assert failed_user["subscription_status"] == "none"
+
+    revoke_payload = _stripe_event(
+        "evt_async_failed_same_session",
+        "checkout.session.async_payment_failed",
+        _checkout_session_object(
+            same_session["user_id"],
+            customer="cus_test",
+            subscription="sub_test",
+            payment_status="unpaid",
+        ),
+    )
+    revoke = _post_webhook(client, revoke_payload)
+    assert revoke.status_code == 200
+    revoked_user = get_user_by_id(same_session["user_id"])
+    assert revoked_user["plan"] == "free"
+    assert revoked_user["subscription_status"] == "canceled"
+    assert revoked_user["stripe_subscription_id"] in {None, ""}
+    assert get_entitlement(same_session["user_id"])["plan"] == "free"
+
+    other_payload = _stripe_event(
+        "evt_async_failed_other_session",
+        "checkout.session.async_payment_failed",
+        _checkout_session_object(
+            other_subscription["user_id"],
+            customer="cus_other",
+            subscription="sub_async_unrelated",
+            payment_status="unpaid",
+        ),
+    )
+    other = _post_webhook(client, other_payload)
+    assert other.status_code == 200
+    untouched = get_user_by_id(other_subscription["user_id"])
+    assert untouched["plan"] == "essencial"
+    assert untouched["subscription_status"] == "active"
+    assert untouched["stripe_subscription_id"] == "sub_other_live"
+
+
+def test_webhook_accepts_valid_v1_signature_in_second_position(isolated_db, monkeypatch):
+    secret = "whsec_test"
+    monkeypatch.setattr("config.STRIPE_WEBHOOK_SECRET", secret)
+    client = _client()
+    session = _register(client, "billing.sig-second-v1@example.com")
+    payload = _stripe_event(
+        "evt_second_v1",
+        "checkout.session.completed",
+        _checkout_session_object(session["user_id"]),
+    )
+    signed = _sign_stripe_payload(payload, secret)["Stripe-Signature"]
+    timestamp, _, valid_signature = signed.partition(",v1=")
+    header = (
+        f"{timestamp},v1="
+        "0000000000000000000000000000000000000000000000000000000000000000,"
+        f"v1={valid_signature}"
+    )
+    response = _post_webhook(
+        client,
+        payload,
+        headers={"Stripe-Signature": header},
+    )
+    assert response.status_code == 200
+    assert response.json().get("duplicate") is not True
+    user = get_user_by_id(session["user_id"])
+    assert user["plan"] == "essencial"
+    assert user["subscription_status"] == "active"
+
+
+def test_webhook_rejects_signature_outside_configured_tolerance(isolated_db, monkeypatch):
+    secret = "whsec_test"
+    monkeypatch.setattr("config.STRIPE_WEBHOOK_SECRET", secret)
+    monkeypatch.setattr("config.STRIPE_WEBHOOK_TOLERANCE_SECONDS", 1)
+    client = _client()
+    session = _register(client, "billing.sig-expired@example.com")
+    payload = _stripe_event(
+        "evt_expired_sig",
+        "checkout.session.completed",
+        _checkout_session_object(session["user_id"]),
+    )
+    expired_at = str(int(time.time()) - 30)
+    response = _post_webhook(
+        client,
+        payload,
+        headers=_sign_stripe_payload(payload, secret, timestamp=expired_at),
+    )
+    assert response.status_code == 400
+    user = get_user_by_id(session["user_id"])
+    assert user["plan"] == "free"
+    assert user["subscription_status"] == "none"
+
+
+def test_webhook_missing_signature_returns_400(isolated_db, monkeypatch):
+    monkeypatch.setattr("config.STRIPE_WEBHOOK_SECRET", "whsec_test")
+    client = _client()
+    response = client.post(
+        "/billing/webhook",
+        content=b"{}",
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 400
+
+
+def test_webhook_unknown_user_logs_only_event_id_and_type(isolated_db, monkeypatch, caplog):
+    monkeypatch.setattr("config.STRIPE_WEBHOOK_SECRET", "whsec_test")
+    client = _client()
+    secret_email = "pessoa.oculta@example.com"
+    secret_customer = "cus_pessoa_oculta"
+    secret_user = "user_pessoa_oculta"
+    payload = _stripe_event(
+        "evt_unknown_user",
+        "checkout.session.completed",
+        {
+            "client_reference_id": secret_user,
+            "customer": secret_customer,
+            "customer_email": secret_email,
+            "subscription": "sub_pessoa_oculta",
+            "payment_status": "paid",
+            "metadata": {"user_id": secret_user, "email": secret_email},
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger="services.billing"):
+        response = _post_webhook(client, payload)
+
+    assert response.status_code == 200
+    assert secret_email not in response.text
+    assert secret_customer not in response.text
+    billing_records = [
+        record for record in caplog.records if record.name == "services.billing"
+    ]
+    assert billing_records
+    for record in billing_records:
+        rendered = record.getMessage()
+        assert "evt_unknown_user" in rendered
+        assert "checkout.session.completed" in rendered
+        assert record.args == ("evt_unknown_user", "checkout.session.completed")
+        blob = f"{rendered} {record.args!r}"
+        assert secret_email not in blob
+        assert secret_customer not in blob
+        assert secret_user not in blob
+        assert "sub_pessoa_oculta" not in blob
+        assert payload.decode() not in blob
 
 
 def test_usage_resets_on_new_utc_month(isolated_db, monkeypatch):

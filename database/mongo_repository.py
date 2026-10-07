@@ -677,6 +677,11 @@ def claim_stripe_webhook_event(event_id: str, event_type: str) -> bool:
         return False
 
 
+def release_stripe_webhook_event(event_id: str) -> None:
+    """Drop a claim so Stripe can redeliver the same event.id after a failure."""
+    _get_collection("stripe_webhook_events").delete_one({"event_id": event_id})
+
+
 def collect_user_export_payload(user_id: str) -> dict[str, Any]:
     user = get_user_by_id(user_id)
     if not user:
