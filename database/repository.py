@@ -1102,6 +1102,19 @@ def claim_stripe_webhook_event(event_id: str, event_type: str) -> bool:
         return cursor.rowcount > 0
 
 
+def release_stripe_webhook_event(event_id: str) -> None:
+    """Drop a claim so Stripe can redeliver the same event.id after a failure."""
+    if _use_mongodb():
+        mongo_repository.release_stripe_webhook_event(event_id)
+        return
+
+    with _connect() as connection:
+        connection.execute(
+            "DELETE FROM stripe_webhook_events WHERE event_id = ?",
+            (event_id,),
+        )
+
+
 def count_generated_files(user_id: str) -> int:
     if _use_mongodb():
         return mongo_repository.count_generated_files(user_id)
