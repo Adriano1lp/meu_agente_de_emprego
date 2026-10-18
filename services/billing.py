@@ -39,6 +39,24 @@ def current_usage_period() -> str:
     return datetime.now(UTC).strftime("%Y-%m")
 
 
+def usage_period_end(period: str) -> str:
+    """UTC instant when the quota for ``period`` (YYYY-MM) resets.
+
+    The reset is 00:00:00Z on the first day of the next calendar month.
+    December rolls into January of the following year. The value is derived
+    only from ``period``, the same bucket stored by ``current_usage_period``.
+    """
+    year_text, month_text = period.split("-")
+    year = int(year_text)
+    month = int(month_text)
+    if month == 12:
+        year += 1
+        month = 1
+    else:
+        month += 1
+    return datetime(year, month, 1, tzinfo=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def monthly_quota_for_plan(plan: str) -> int:
     if plan == PLAN_ESSENCIAL:
         return app_config.ESSENCIAL_PROCESSAR_QUOTA_MONTHLY
@@ -64,6 +82,7 @@ def get_entitlement(user_id: str) -> dict[str, Any]:
         "stored_plan": stored_plan,
         "subscription_status": subscription_status,
         "period": period,
+        "period_end": usage_period_end(period),
         "used": used,
         "limit": limit,
         "remaining": max(0, limit - used),
@@ -106,6 +125,7 @@ def release_processar_quota(user_id: str, *, period: str | None = None) -> dict[
         refund_limit=PROCESSAR_REFUND_LIMIT,
     )
     entitlement["period"] = usage_period
+    entitlement["period_end"] = usage_period_end(usage_period)
     entitlement["used"] = int(result["used"])
     entitlement["remaining"] = max(0, entitlement["limit"] - entitlement["used"])
     return entitlement
@@ -125,6 +145,7 @@ def revert_processar_reservation(user_id: str, *, period: str | None = None) -> 
         period=usage_period,
     )
     entitlement["period"] = usage_period
+    entitlement["period_end"] = usage_period_end(usage_period)
     entitlement["used"] = int(result["used"])
     entitlement["remaining"] = max(0, entitlement["limit"] - entitlement["used"])
     return entitlement
