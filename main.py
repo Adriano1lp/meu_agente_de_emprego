@@ -459,6 +459,7 @@ def read_billing_entitlement(
         "used": entitlement["used"],
         "limit": entitlement["limit"],
         "period": entitlement["period"],
+        "period_end": entitlement["period_end"],
         "remaining": entitlement["remaining"],
     }
 

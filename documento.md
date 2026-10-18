@@ -587,11 +587,13 @@ Cotas e assinatura sao avaliadas **no servidor**. Nesta fatia a cota vale apenas
 | Free | — | **5** por mes civil UTC | sem assinatura `active` |
 | Essencial | **R$ 19,90/mes** | **30** por mes civil UTC | Stripe `subscription_status=active` |
 
-O contador e por `user_id` + `YYYY-MM` (UTC) e zera automaticamente no dia 1 de cada mes UTC. `past_due` nao conta como Essencial (grace 0 dias): a cota efetiva volta a 5. Cancelamento/exclusao da assinatura grava `plan=free` e cota 5.
+O contador e por `user_id` + `YYYY-MM` (UTC) e zera automaticamente no dia 1 de cada mes UTC. `past_due` nao conta como Essencial (grace 0 dias): a cota efetiva volta a 5. Cancelamento/exclusao da assinatura grava `plan=free` e cota 5. O ciclo de cobranca da Stripe nao altera esse periodo.
 
 ### `GET /billing/me`
 
 Autenticado + consentimento vigente. Devolve o entitlement efetivo.
+
+`period` e o mes civil UTC corrente (`YYYY-MM`). `period_end` e o instante UTC em que a cota desse mesmo periodo zera: `00:00:00Z` do dia 1 do mes seguinte (`2026-10` -> `2026-11-01T00:00:00Z`; dezembro -> janeiro do ano seguinte). Os dois campos saem do mesmo periodo de uso. O cliente nao calcula a data.
 
 ```bash
 curl -H "Authorization: Bearer <jwt>" http://localhost:8000/billing/me
@@ -604,6 +606,7 @@ curl -H "Authorization: Bearer <jwt>" http://localhost:8000/billing/me
   "used": 0,
   "limit": 5,
   "period": "2026-09",
+  "period_end": "2026-10-01T00:00:00Z",
   "remaining": 5
 }
 ```

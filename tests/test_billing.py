@@ -23,6 +23,7 @@ from services.billing import (
     current_usage_period,
     get_entitlement,
     handle_stripe_webhook,
+    usage_period_end,
 )
 
 
@@ -821,3 +822,55 @@ def test_usage_resets_on_new_utc_month(isolated_db, monkeypatch):
     consume_processar_quota(session["user_id"])
     assert get_processar_usage(session["user_id"], "2026-09") == 1
     assert get_entitlement(session["user_id"])["used"] == 1
+
+
+def test_usage_period_end_for_normal_month():
+    assert usage_period_end("2026-10") == "2026-11-01T00:00:00Z"
+    assert usage_period_end("2026-01") == "2026-02-01T00:00:00Z"
+
+
+def test_usage_period_end_december_rolls_into_next_year():
+    assert usage_period_end("2026-12") == "2027-01-01T00:00:00Z"
+    assert usage_period_end("1999-12") == "2000-01-01T00:00:00Z"
+
+
+@pytest.mark.parametrize(
+    ("period", "period_end"),
+    [
+        ("2026-10", "2026-11-01T00:00:00Z"),
+        ("2026-12", "2027-01-01T00:00:00Z"),
+    ],
+)
+def test_billing_me_period_end_follows_usage_period(
+    isolated_db,
+    monkeypatch,
+    period,
+    period_end,
+):
+    monkeypatch.setattr("services.billing.current_usage_period", lambda: period)
+    client = _client()
+    session = _register(client, f"billing.period-end-{period}@example.com")
+
+    response = client.get("/billing/me", headers=session["auth"])
+    assert response.status_code == 200
+    body = response.json()
+    entitlement = get_entitlement(session["user_id"])
+
+    assert body["period"] == period == entitlement["period"]
+    assert body["period_end"] == period_end
+    assert body["period_end"] == usage_period_end(body["period"])
+    assert entitlement["period_end"] == body["period_end"]
+    assert set(body) == {
+        "plan",
+        "subscription_status",
+        "used",
+        "limit",
+        "period",
+        "period_end",
+        "remaining",
+    }
+    assert body["plan"] == "free"
+    assert body["subscription_status"] == "none"
+    assert body["used"] == 0
+    assert body["limit"] == 5
+    assert body["remaining"] == 5
