@@ -41,6 +41,7 @@ from database.repository import (
     create_job_analysis_insight,
     create_processing_run,
     delete_embedding_chunks,
+    get_latest_user_cv_metadata,
     get_latest_user_document_id,
     is_deleted_user,
     list_job_analysis_insights,
@@ -509,20 +510,28 @@ def upload_cv(
     except Exception as exc:
         _log_cv_embedding_failure(exc)
         _invalidate_user_embeddings(user_id)
-        return _upload_cv_without_embeddings(saved)
+        return _public_upload_cv_response(_upload_cv_without_embeddings(saved))
 
     if not _user_has_embeddings(user_id):
         logger.error("Embeddings ausentes apos rebuild de CV")
         _invalidate_user_embeddings(user_id)
-        return _upload_cv_without_embeddings(saved)
+        return _public_upload_cv_response(_upload_cv_without_embeddings(saved))
 
-    return {
+    return _public_upload_cv_response({
         **saved,
         "embeddings": embeddings,
         "has_cv": True,
         "has_embeddings": True,
         "ready_for_analysis": True,
-    }
+    })
+
+
+@app.get("/users/me/cv")
+def read_current_user_cv(user_id: str = Depends(_require_terms_accepted)) -> dict[str, Any]:
+    cv = get_latest_user_cv_metadata(user_id)
+    if cv is None:
+        raise HTTPException(status_code=404, detail="Curriculo nao encontrado")
+    return cv
 
 
 @app.post("/users/me/profile")
@@ -594,7 +603,7 @@ def create_manual_profile(
 
     payload = profile.model_dump(exclude_none=True)
     saved = save_manual_profile(payload, user_id)
-    embeddings = rebuild_vectorstore_for_user(user_id)
+    embeddings = _public_embeddings_response(rebuild_vectorstore_for_user(user_id))
     return {**saved, "embeddings": embeddings, "ready_for_analysis": True}
 
 
@@ -628,7 +637,7 @@ def read_user_status(user_id: str = Depends(_require_terms_accepted)) -> dict[st
 
 @app.post("/users/me/rebuild-embeddings")
 def rebuild_embeddings(user_id: str = Depends(_require_terms_accepted)) -> dict[str, Any]:
-    return rebuild_vectorstore_for_user(user_id)
+    return _public_embeddings_response(rebuild_vectorstore_for_user(user_id))
 
 
 _FILE_NOT_FOUND_DETAIL = "Arquivo nao encontrado"
@@ -974,6 +983,26 @@ def _user_has_embeddings(user_id: str, chroma_dir: Path | None = None) -> bool:
         return count_embedding_chunks(user_id) > 0
     directory = chroma_dir if chroma_dir is not None else get_user_chroma_dir(user_id)
     return directory.exists() and any(directory.iterdir())
+
+
+_UPLOAD_CV_HIDDEN_FIELDS = frozenset({"cv_file", "original_file", "object_key"})
+_EMBEDDING_HIDDEN_FIELDS = frozenset({"chroma_dir", "vector_store", "cv_file"})
+
+
+def _without_hidden_fields(payload: dict[str, Any], hidden: frozenset[str]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if key not in hidden}
+
+
+def _public_embeddings_response(payload: dict[str, Any]) -> dict[str, Any]:
+    return _without_hidden_fields(payload, _EMBEDDING_HIDDEN_FIELDS)
+
+
+def _public_upload_cv_response(payload: dict[str, Any]) -> dict[str, Any]:
+    body = _without_hidden_fields(payload, _UPLOAD_CV_HIDDEN_FIELDS)
+    embeddings = body.get("embeddings")
+    if isinstance(embeddings, dict):
+        body["embeddings"] = _public_embeddings_response(embeddings)
+    return body
 
 
 def _upload_cv_without_embeddings(saved: dict[str, Any]) -> dict[str, Any]:

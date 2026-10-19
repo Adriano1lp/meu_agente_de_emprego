@@ -92,9 +92,6 @@ def save_user_cv(upload_file: UploadFile, user_id: str) -> dict[str, Any]:
         "content_type": upload_file.content_type or "application/octet-stream",
         "bytes_received": file_size,
         "updated_at": updated_at,
-        "cv_file": str(cv_file),
-        "original_file": str(original_file_path),
-        "object_key": original_object_key,
         "extracted_text_object_key": extracted_text_object_key,
     }
 

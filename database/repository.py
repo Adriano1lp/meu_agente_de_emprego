@@ -484,6 +484,93 @@ def get_latest_user_cv_text(user_id: str) -> str | None:
     return None
 
 
+# pending permanece distinto de none: none só quando não há run deste CV
+# (ou o status gravado está fora de completed|failed|pending).
+_PUBLIC_EMBEDDING_STATUSES = frozenset({"completed", "failed", "pending"})
+
+
+def get_latest_user_cv_metadata(user_id: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        record = mongo_repository.get_latest_user_cv_record(user_id)
+    else:
+        record = _sqlite_latest_user_cv_record(user_id)
+    if record is None:
+        return None
+    return _public_cv_metadata(record)
+
+
+def _sqlite_latest_user_cv_record(user_id: str) -> dict[str, Any] | None:
+    with _connect() as connection:
+        document = connection.execute(
+            """
+            SELECT document_id, original_filename, original_content_type,
+                bytes_received, created_at
+            FROM user_documents
+            WHERE user_id = ? AND document_type = 'cv'
+            ORDER BY created_at DESC, document_id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        if document is None:
+            return None
+
+        run = connection.execute(
+            """
+            SELECT status, processed_at
+            FROM embedding_runs
+            WHERE user_id = ? AND document_id = ?
+            ORDER BY processed_at DESC, embedding_run_id DESC
+            LIMIT 1
+            """,
+            (user_id, document["document_id"]),
+        ).fetchone()
+
+    return {
+        "filename": document["original_filename"],
+        "content_type": document["original_content_type"],
+        "bytes": document["bytes_received"],
+        "uploaded_at": document["created_at"],
+        "embedding_status": None if run is None else run["status"],
+        "processed_at": None if run is None else run["processed_at"],
+    }
+
+
+def _public_cv_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    status = record.get("embedding_status")
+    public_status = status if status in _PUBLIC_EMBEDDING_STATUSES else "none"
+    return {
+        "filename": str(record.get("filename") or ""),
+        "content_type": str(record.get("content_type") or ""),
+        "bytes": int(record.get("bytes") or 0),
+        "uploaded_at": _to_utc_iso(record.get("uploaded_at")),
+        "embedding_status": public_status,
+        "processed_at": (
+            _to_utc_iso(record.get("processed_at")) if public_status != "none" else None
+        ),
+    }
+
+
+def _to_utc_iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+        if "T" not in normalized and " " in normalized:
+            normalized = normalized.replace(" ", "T", 1)
+        moment = datetime.fromisoformat(normalized)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    else:
+        moment = moment.astimezone(UTC)
+    return moment.replace(microsecond=0).isoformat()
+
+
 def create_embedding_run(run: dict[str, Any]) -> int | str:
     if _use_mongodb():
         return mongo_repository.create_embedding_run(run)
