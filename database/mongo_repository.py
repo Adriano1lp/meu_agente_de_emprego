@@ -265,6 +265,43 @@ def get_latest_user_cv_text(user_id: str) -> str | None:
     return text or None
 
 
+def get_latest_user_cv_record(user_id: str) -> dict[str, Any] | None:
+    document = _get_collection("user_documents").find_one(
+        {"user_id": user_id, "document_type": "cv"},
+        sort=[("created_at", -1), ("_id", -1)],
+        projection={
+            "_id": 1,
+            "original_filename": 1,
+            "original_content_type": 1,
+            "bytes_received": 1,
+            "created_at": 1,
+        },
+    )
+    if not document:
+        return None
+
+    document_id = document["_id"]
+    run = _get_collection("embedding_runs").find_one(
+        {
+            "user_id": user_id,
+            "$or": [
+                {"document_id": str(document_id)},
+                {"document_id": document_id},
+            ],
+        },
+        sort=[("processed_at", -1), ("_id", -1)],
+        projection={"_id": 0, "status": 1, "processed_at": 1},
+    )
+    return {
+        "filename": document.get("original_filename"),
+        "content_type": document.get("original_content_type"),
+        "bytes": document.get("bytes_received"),
+        "uploaded_at": document.get("created_at"),
+        "embedding_status": None if run is None else run.get("status"),
+        "processed_at": None if run is None else run.get("processed_at"),
+    }
+
+
 def create_embedding_run(run: dict[str, Any]) -> str:
     ensure_user_exists(run["user_id"])
     payload = {**run, "created_at": _utc_now_iso()}

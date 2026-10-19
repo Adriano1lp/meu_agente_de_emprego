@@ -112,9 +112,6 @@ def rebuild_vectorstore_for_user(user_id: str) -> dict[str, Any]:
         "chunks": len(txt_chunks),
         "processed_at": processed_at,
         "embedding_model": OPENAI_EMBEDDING_MODEL,
-        "chroma_dir": str(chroma_dir),
-        "vector_store": "mongodb" if _use_mongodb_embeddings() else "chroma",
-        "cv_file": str(cv_file),
     }
 
 

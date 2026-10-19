@@ -149,9 +149,15 @@ def _saved_cv_fields(body: dict, session: dict) -> None:
     assert body["filename"] == "cv.txt"
     assert body["bytes_received"] == len(CV_TEXT.encode("utf-8"))
     assert "updated_at" in body
-    assert "cv_file" in body
-    assert "original_file" in body
-    assert "object_key" in body
+    assert "cv_file" not in body
+    assert "original_file" not in body
+    assert "object_key" not in body
+    assert "extracted_text_object_key" not in body
+    embeddings = body.get("embeddings")
+    if isinstance(embeddings, dict):
+        assert "chroma_dir" not in embeddings
+        assert "vector_store" not in embeddings
+        assert "cv_file" not in embeddings
     cv_file = get_user_cv_file(session["user_id"])
     assert cv_file.exists()
     assert cv_file.read_text(encoding="utf-8") == CV_TEXT
