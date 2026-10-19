@@ -11,8 +11,8 @@ from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from starlette.datastructures import MutableHeaders
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from auth import (
@@ -25,7 +25,6 @@ from config import (
     APP_NAME,
     APP_VERSION,
     AUTH_MODE,
-    CORS_ALLOW_ORIGINS,
     PERSISTENCE_BACKEND,
     PUBLIC_BASE_URL,
     ensure_runtime_config,
@@ -33,6 +32,7 @@ from config import (
     get_user_cv_file,
     get_user_output_dir,
 )
+from cors_middleware import DynamicCORSMiddleware
 from database.generated_file_names import is_safe_generated_file_name
 from database.repository import (
     count_embedding_chunks,
@@ -90,6 +90,17 @@ from services.user_data import (
     save_user_cv,
     save_user_profile,
 )
+from services.web_session import (
+    REFRESH_COOKIE_NAME,
+    clear_refresh_cookie_header,
+    cookie_session_requested,
+    enforce_cookie_csrf,
+    issue_web_session,
+    logout_web_session,
+    refresh_cookie_header,
+    refresh_cookie_max_age,
+    refresh_web_session,
+)
 
 ensure_runtime_config()
 
@@ -114,13 +125,34 @@ _INPUT_EXCEPTION_NAMES = frozenset({"OutputParserException"})
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ALLOW_ORIGINS or ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+_AUTH_NO_STORE_PATHS = {
+    "/auth/login",
+    "/auth/register",
+    "/auth/refresh",
+    "/auth/logout",
+}
+
+
+class _NoStoreAuthMiddleware:
+    def __init__(self, asgi_app):
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") not in _AUTH_NO_STORE_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        async def send_no_store(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["Cache-Control"] = "no-store"
+            await send(message)
+
+        await self.app(scope, receive, send_no_store)
+
+
+app.add_middleware(DynamicCORSMiddleware)
+app.add_middleware(_NoStoreAuthMiddleware)
 
 
 class RequestData(BaseModel):
@@ -224,11 +256,13 @@ class AuthRegisterRequest(BaseModel):
     terms_version: str | None = None
     privacy_accepted: bool | None = None
     privacy_version: str | None = None
+    session: str | None = None
 
 
 class AuthLoginRequest(BaseModel):
     email: str
     password: str
+    session: str | None = None
 
 
 class PasswordResetRequest(BaseModel):
@@ -325,7 +359,15 @@ def healthcheck() -> dict[str, str]:
 
 
 @app.post("/auth/register")
-def auth_register(payload: AuthRegisterRequest) -> dict[str, Any]:
+def auth_register(
+    payload: AuthRegisterRequest,
+    x_mae_client: str | None = Header(default=None, alias="X-MAE-Client"),
+    origin: str | None = Header(default=None, alias="Origin"),
+    x_mae_csrf: str | None = Header(default=None, alias="X-MAE-CSRF"),
+) -> Response:
+    cookie_mode = cookie_session_requested(payload.session, x_mae_client)
+    if cookie_mode:
+        enforce_cookie_csrf(origin, x_mae_csrf)
     user = register_user(
         display_name=payload.display_name,
         email=payload.email,
@@ -335,31 +377,85 @@ def auth_register(payload: AuthRegisterRequest) -> dict[str, Any]:
         privacy_accepted=payload.privacy_accepted,
         privacy_version=payload.privacy_version,
     )
-    token = create_access_token(
-        user_id=user["user_id"],
-        email=user["email"],
-        display_name=user["display_name"],
-    )
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": user,
-    }
+    return _auth_session_response(user, cookie_mode=cookie_mode)
 
 
 @app.post("/auth/login")
-def auth_login(payload: AuthLoginRequest) -> dict[str, Any]:
+def auth_login(
+    payload: AuthLoginRequest,
+    x_mae_client: str | None = Header(default=None, alias="X-MAE-Client"),
+    origin: str | None = Header(default=None, alias="Origin"),
+    x_mae_csrf: str | None = Header(default=None, alias="X-MAE-CSRF"),
+) -> Response:
+    cookie_mode = cookie_session_requested(payload.session, x_mae_client)
+    if cookie_mode:
+        enforce_cookie_csrf(origin, x_mae_csrf)
     user = authenticate_user(payload.email, payload.password)
-    token = create_access_token(
-        user_id=user["user_id"],
-        email=user["email"],
-        display_name=user["display_name"],
+    return _auth_session_response(user, cookie_mode=cookie_mode)
+
+
+@app.post("/auth/refresh")
+def auth_refresh(
+    request: Request,
+    origin: str | None = Header(default=None, alias="Origin"),
+    x_mae_csrf: str | None = Header(default=None, alias="X-MAE-CSRF"),
+) -> Response:
+    enforce_cookie_csrf(origin, x_mae_csrf)
+    try:
+        body, raw_token = refresh_web_session(request.cookies.get(REFRESH_COOKIE_NAME))
+    except HTTPException as exc:
+        if exc.status_code != 401:
+            raise
+        response = JSONResponse(
+            status_code=401,
+            content={"detail": "Sessao invalida"},
+        )
+        response.headers.append("set-cookie", clear_refresh_cookie_header())
+        return response
+
+    response = JSONResponse(body)
+    response.headers.append(
+        "set-cookie",
+        refresh_cookie_header(raw_token, refresh_cookie_max_age()),
     )
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": user,
-    }
+    return response
+
+
+@app.post("/auth/logout")
+def auth_logout(
+    request: Request,
+    origin: str | None = Header(default=None, alias="Origin"),
+    x_mae_csrf: str | None = Header(default=None, alias="X-MAE-CSRF"),
+) -> Response:
+    enforce_cookie_csrf(origin, x_mae_csrf)
+    logout_web_session(request.cookies.get(REFRESH_COOKIE_NAME))
+    response = Response(status_code=204)
+    response.headers.append("set-cookie", clear_refresh_cookie_header())
+    return response
+
+
+def _auth_session_response(user: dict[str, Any], *, cookie_mode: bool) -> Response:
+    if not cookie_mode:
+        token = create_access_token(
+            user_id=user["user_id"],
+            email=user["email"],
+            display_name=user["display_name"],
+        )
+        return JSONResponse(
+            {
+                "access_token": token,
+                "token_type": "bearer",
+                "user": user,
+            }
+        )
+
+    body, raw_token = issue_web_session(user)
+    response = JSONResponse(body)
+    response.headers.append(
+        "set-cookie",
+        refresh_cookie_header(raw_token, refresh_cookie_max_age()),
+    )
+    return response
 
 
 @app.post("/auth/password-reset/request")

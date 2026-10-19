@@ -59,6 +59,33 @@ CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
 
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at
     ON password_reset_tokens (expires_at);
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    refresh_token_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT NOT NULL UNIQUE,
+    family_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    family_expires_at TEXT NOT NULL,
+    used_at TEXT,
+    replaced_by_hash TEXT,
+    revoked_at TEXT,
+    revoke_reason TEXT,
+    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family_id
+    ON refresh_tokens (family_id);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id
+    ON refresh_tokens (user_id);
+
+-- Limpeza: no Mongo o TTL incide em family_expires_at (com folga).
+-- No SQLite nao ha TTL nativo; o indice fica na mesma coluna.
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family_expires_at
+    ON refresh_tokens (family_expires_at);
+
 CREATE TABLE IF NOT EXISTS user_profiles (
     profile_id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL UNIQUE,
@@ -264,3 +291,6 @@ VALUES (4, 'object_storage_keys');
 
 INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (5, 'processar_usage_refunds');
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (6, 'refresh_token_families');

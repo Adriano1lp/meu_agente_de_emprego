@@ -8,7 +8,11 @@ from fastapi import HTTPException
 
 import config
 from config import sanitize_user_id
-from database.repository import anonymize_and_purge_user, collect_user_export_payload
+from database.repository import (
+    anonymize_and_purge_user,
+    collect_user_export_payload,
+    revoke_refresh_families_for_user,
+)
 from services.auth_users import get_user_by_id
 from services.object_storage import purge_user_objects
 
@@ -44,8 +48,13 @@ def delete_current_user(user_id: str) -> dict[str, Any]:
     if not user:
         raise HTTPException(status_code=404, detail="Usuario nao encontrado")
 
-    _purge_user_files(safe_user_id)
     deleted_at = _utc_now_iso()
+    revoke_refresh_families_for_user(
+        user_id=safe_user_id,
+        revoked_at=deleted_at,
+        reason="account_deleted",
+    )
+    _purge_user_files(safe_user_id)
     purged = anonymize_and_purge_user(safe_user_id, deleted_at=deleted_at)
     if not purged:
         raise HTTPException(status_code=404, detail="Usuario nao encontrado")

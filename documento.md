@@ -10,7 +10,7 @@ http://localhost:8000
 
 ## Visao geral da autenticacao
 
-O fluxo principal agora e baseado em JWT.
+O fluxo principal do app continua baseado em JWT.
 
 1. O cliente cria conta em `POST /auth/register` ou entra em `POST /auth/login`
 2. A API devolve `access_token`
@@ -34,11 +34,12 @@ O backend ainda mantem suporte ao header legado `X-User-Id` quando `AUTH_MODE` n
 
 O token emitido pela API:
 
-- e assinado com HMAC SHA-256
-- carrega `sub`, `user_id`, `email`, `display_name`, `iat` e `exp`
-- respeita `JWT_EXPIRATION_MINUTES`
+- e assinado com HMAC SHA-256, sempre com `alg` HS256
+- carrega `sub`, `user_id`, `email`, `display_name`, `typ` (`access`), `iat` e `exp`
+- no app, respeita `JWT_EXPIRATION_MINUTES`
+- na web, no modo cookie, respeita `WEB_ACCESS_TOKEN_MINUTES`
 
-Se o token estiver ausente, expirado ou com assinatura invalida, a API responde com `401`.
+`exp` e obrigatorio. Token malformado, com `alg` diferente de HS256, sem `typ` `access`, ou com bytes nao ASCII responde `401`. O refresh opaco nao vale como Bearer.
 
 ## 1. Health check
 
@@ -166,6 +167,30 @@ curl -X POST \
 ### Erros comuns
 
 - `401`: email ou senha invalidos
+
+### Sessao persistente da web
+
+Opt-in: campo `session` com valor `cookie` ou header `X-MAE-Client: web`. Sem esse opt-in, login e register seguem o contrato do app (sem cookie e sem `expires_in`).
+
+No modo cookie, login e register exigem `Origin` exatamente igual a um item de `CORS_ALLOW_ORIGINS` (nunca `*`) e o header `X-MAE-CSRF: 1`. Sem isso a resposta e `403` e a conta, no register, nao e criada.
+
+A resposta ganha `expires_in` (segundos do access) e o header:
+
+```http
+Set-Cookie: __Secure-mae_rt=<opaco>; Max-Age=<REFRESH_TOKEN_IDLE_DAYS em segundos>; Path=/auth; Secure; HttpOnly; SameSite=None; Partitioned
+```
+
+Nao ha atributo `Domain` (cookie host-only). O valor opaco nao volta no JSON. No banco fica so o SHA-256, sem IP e sem user agent. A familia vive no maximo `REFRESH_FAMILY_MAX_DAYS`; a ociosidade `REFRESH_TOKEN_IDLE_DAYS` renova a cada rotacao e `family_expires_at` nao e estendido.
+
+`POST /auth/refresh` nao tem body. Le o cookie, exige o mesmo Origin e `X-MAE-CSRF`, devolve `{access_token, token_type, expires_in}` e rotaciona o cookie. O access novo sai do usuario ativo no banco. Falha (expirado, revogado, reutilizado, usuario ausente ou inativo) responde `401` com `Sessao invalida`, limpa o cookie com os mesmos atributos e `Max-Age=0` e, no reuso, revoga a familia inteira. Servidor estrito, sem janela de graca. Termos desatualizados nao bloqueiam o refresh.
+
+`POST /auth/logout` tem as mesmas checagens, responde `204` mesmo sem cookie, revoga a familia e limpa o cookie.
+
+`POST /auth/password-reset/confirm` e `DELETE /users/me` revogam todas as familias do usuario.
+
+Login, register, refresh e logout enviam `Cache-Control: no-store`.
+
+CORS usa so as origens do ambiente, com credenciais, metodos `GET, POST, PUT, PATCH, DELETE, OPTIONS`, headers `Authorization`, `Content-Type` e `X-MAE-CSRF`, e `Vary: Origin`.
 
 ## 4. Restaurar sessao
 
@@ -982,6 +1007,9 @@ backend `local` grava em `STORAGE_DIR`. Em `ENV=production` ou
 - `AUTH_MODE`
 - `JWT_SECRET`
 - `JWT_EXPIRATION_MINUTES`
+- `WEB_ACCESS_TOKEN_MINUTES` (padrao 15; access da web)
+- `REFRESH_TOKEN_IDLE_DAYS` (padrao 7; ociosidade do refresh)
+- `REFRESH_FAMILY_MAX_DAYS` (padrao 30; limite absoluto da familia)
 - `MAX_UPLOAD_SIZE_MB`
 - `STORAGE_DIR`
 - `MONGODB_URI`
