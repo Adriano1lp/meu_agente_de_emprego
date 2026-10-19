@@ -26,6 +26,7 @@ from database.repository import (
     get_user_by_email,
     get_user_by_id as find_user_by_id,
     mark_password_reset_token_used,
+    revoke_refresh_families_for_user,
     update_user_consent,
     update_user_password_hash,
     user_id_exists,
@@ -171,6 +172,11 @@ def confirm_password_reset(token: str, new_password: str) -> dict[str, str]:
     mark_password_reset_token_used(
         token_hash=str(reset_token["token_hash"]),
         used_at=now,
+    )
+    revoke_refresh_families_for_user(
+        user_id=user_id,
+        revoked_at=now,
+        reason="password_reset",
     )
     return {"message": "Senha redefinida com sucesso"}
 

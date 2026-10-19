@@ -188,6 +188,138 @@ def mark_password_reset_token_used(*, token_hash: str, used_at: str) -> None:
         {"$set": {"used_at": used_at}},
     )
 
+
+_REFRESH_DATE_FIELDS = (
+    "created_at",
+    "expires_at",
+    "family_expires_at",
+    "used_at",
+    "revoked_at",
+)
+# Folga depois de family_expires_at para um token velho ainda achar a familia.
+REFRESH_FAMILY_TTL_GRACE_SECONDS = 7 * 24 * 60 * 60
+
+
+def create_refresh_token(token_data: dict[str, Any]) -> None:
+    _get_collection("refresh_tokens").insert_one(_refresh_to_mongo(token_data))
+
+
+def get_refresh_token_by_hash(token_hash: str) -> dict[str, Any] | None:
+    token = _get_collection("refresh_tokens").find_one(
+        {"token_hash": token_hash},
+        {"_id": 0},
+    )
+    return _refresh_from_mongo(token)
+
+
+def rotate_refresh_token(
+    *,
+    presented_hash: str,
+    new_hash: str,
+    now_iso: str,
+    new_expires_at: str,
+    created_at: str,
+) -> dict[str, Any] | None:
+    """Rotacao atomica. family_expires_at copiado do documento consumido."""
+    try:
+        from pymongo import ReturnDocument
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dependencia pymongo nao instalada. Execute pip install -r requirements.txt."
+        ) from exc
+
+    now = _parse_utc(now_iso)
+    collection = _get_collection("refresh_tokens")
+    consumed = collection.find_one_and_update(
+        {
+            "token_hash": presented_hash,
+            "used_at": None,
+            "revoked_at": None,
+            "expires_at": {"$gt": now},
+            "family_expires_at": {"$gt": now},
+        },
+        {"$set": {"used_at": now, "replaced_by_hash": new_hash}},
+        return_document=ReturnDocument.BEFORE,
+    )
+    if not consumed:
+        return None
+
+    family_expires_at = consumed["family_expires_at"]
+    collection.insert_one(
+        {
+            "token_hash": new_hash,
+            "family_id": consumed["family_id"],
+            "user_id": consumed["user_id"],
+            "created_at": _parse_utc(created_at),
+            "expires_at": _parse_utc(new_expires_at),
+            "family_expires_at": family_expires_at,
+            "used_at": None,
+            "replaced_by_hash": None,
+            "revoked_at": None,
+            "revoke_reason": None,
+        }
+    )
+    return {
+        "user_id": consumed["user_id"],
+        "family_id": consumed["family_id"],
+        "family_expires_at": _as_iso(family_expires_at),
+        "expires_at": new_expires_at,
+    }
+
+
+def revoke_refresh_family(*, family_id: str, revoked_at: str, reason: str) -> None:
+    _get_collection("refresh_tokens").update_many(
+        {"family_id": family_id, "revoked_at": None},
+        {"$set": {"revoked_at": _parse_utc(revoked_at), "revoke_reason": reason}},
+    )
+
+
+def revoke_refresh_families_for_user(
+    *,
+    user_id: str,
+    revoked_at: str,
+    reason: str,
+) -> None:
+    _get_collection("refresh_tokens").update_many(
+        {"user_id": user_id, "revoked_at": None},
+        {"$set": {"revoked_at": _parse_utc(revoked_at), "revoke_reason": reason}},
+    )
+
+
+def _refresh_to_mongo(token_data: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(token_data)
+    for field in _REFRESH_DATE_FIELDS:
+        if payload.get(field) is not None:
+            payload[field] = _parse_utc(payload[field])
+    return payload
+
+
+def _refresh_from_mongo(document: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not document:
+        return None
+    payload = dict(document)
+    payload.pop("_id", None)
+    for field in _REFRESH_DATE_FIELDS:
+        value = payload.get(field)
+        if isinstance(value, datetime):
+            payload[field] = _as_iso(value)
+    return payload
+
+
+def _parse_utc(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _as_iso(value: datetime) -> str:
+    return value.astimezone(UTC).replace(microsecond=0).isoformat()
+
+
 def upsert_user_profile(user_id: str, version: int, profile_data: dict[str, Any]) -> None:
     ensure_user_exists(user_id)
     now = _utc_now_iso()
@@ -880,6 +1012,13 @@ def _ensure_indexes(database: Any) -> None:
     database.password_reset_tokens.create_index("token_hash", unique=True)
     database.password_reset_tokens.create_index([("user_id", 1), ("created_at", -1)])
     database.password_reset_tokens.create_index("expires_at")
+    database.refresh_tokens.create_index("token_hash", unique=True)
+    database.refresh_tokens.create_index("family_id")
+    database.refresh_tokens.create_index("user_id")
+    database.refresh_tokens.create_index(
+        "family_expires_at",
+        expireAfterSeconds=REFRESH_FAMILY_TTL_GRACE_SECONDS,
+    )
     database.user_profiles.create_index("user_id", unique=True)
     database.user_profile_versions.create_index(
         [("user_id", 1), ("version", 1)],

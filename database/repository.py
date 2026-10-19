@@ -357,6 +357,159 @@ def mark_password_reset_token_used(*, token_hash: str, used_at: str) -> None:
             (used_at, token_hash),
         )
 
+
+def create_refresh_token(token_data: dict[str, Any]) -> None:
+    if _use_mongodb():
+        mongo_repository.create_refresh_token(token_data)
+        return
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO refresh_tokens (
+                token_hash, family_id, user_id, created_at, expires_at,
+                family_expires_at, used_at, replaced_by_hash, revoked_at,
+                revoke_reason
+            )
+            VALUES (
+                :token_hash, :family_id, :user_id, :created_at, :expires_at,
+                :family_expires_at, :used_at, :replaced_by_hash, :revoked_at,
+                :revoke_reason
+            )
+            """,
+            token_data,
+        )
+
+
+def get_refresh_token_by_hash(token_hash: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_refresh_token_by_hash(token_hash)
+
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT token_hash, family_id, user_id, created_at, expires_at,
+                family_expires_at, used_at, replaced_by_hash, revoked_at,
+                revoke_reason
+            FROM refresh_tokens
+            WHERE token_hash = ?
+            """,
+            (token_hash,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def rotate_refresh_token(
+    *,
+    presented_hash: str,
+    new_hash: str,
+    now_iso: str,
+    new_expires_at: str,
+    created_at: str,
+) -> dict[str, Any] | None:
+    """Consome o refresh e grava o sucessor na mesma transacao.
+
+    family_expires_at do sucessor e copiado da linha consumida, nunca recalculado.
+    So uma transacao concorrente consegue rowcount == 1.
+    """
+    if _use_mongodb():
+        return mongo_repository.rotate_refresh_token(
+            presented_hash=presented_hash,
+            new_hash=new_hash,
+            now_iso=now_iso,
+            new_expires_at=new_expires_at,
+            created_at=created_at,
+        )
+
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE refresh_tokens
+            SET used_at = ?, replaced_by_hash = ?
+            WHERE token_hash = ?
+              AND used_at IS NULL
+              AND revoked_at IS NULL
+              AND expires_at > ?
+              AND family_expires_at > ?
+            """,
+            (now_iso, new_hash, presented_hash, now_iso, now_iso),
+        )
+        if cursor.rowcount != 1:
+            return None
+
+        inserted = connection.execute(
+            """
+            INSERT INTO refresh_tokens (
+                token_hash, family_id, user_id, created_at, expires_at,
+                family_expires_at, used_at, replaced_by_hash, revoked_at,
+                revoke_reason
+            )
+            SELECT ?, family_id, user_id, ?, ?, family_expires_at,
+                   NULL, NULL, NULL, NULL
+            FROM refresh_tokens
+            WHERE token_hash = ?
+            """,
+            (new_hash, created_at, new_expires_at, presented_hash),
+        )
+        if inserted.rowcount != 1:
+            raise RuntimeError("Falha ao gravar o refresh sucessor")
+
+        row = connection.execute(
+            """
+            SELECT user_id, family_id, family_expires_at, expires_at
+            FROM refresh_tokens
+            WHERE token_hash = ?
+            """,
+            (new_hash,),
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def revoke_refresh_family(*, family_id: str, revoked_at: str, reason: str) -> None:
+    if _use_mongodb():
+        mongo_repository.revoke_refresh_family(
+            family_id=family_id,
+            revoked_at=revoked_at,
+            reason=reason,
+        )
+        return
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            UPDATE refresh_tokens
+            SET revoked_at = ?, revoke_reason = ?
+            WHERE family_id = ? AND revoked_at IS NULL
+            """,
+            (revoked_at, reason, family_id),
+        )
+
+
+def revoke_refresh_families_for_user(
+    *,
+    user_id: str,
+    revoked_at: str,
+    reason: str,
+) -> None:
+    if _use_mongodb():
+        mongo_repository.revoke_refresh_families_for_user(
+            user_id=user_id,
+            revoked_at=revoked_at,
+            reason=reason,
+        )
+        return
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            UPDATE refresh_tokens
+            SET revoked_at = ?, revoke_reason = ?
+            WHERE user_id = ? AND revoked_at IS NULL
+            """,
+            (revoked_at, reason, user_id),
+        )
+
+
 def upsert_user_profile(user_id: str, version: int, profile_data: dict[str, Any]) -> None:
     if _use_mongodb():
         mongo_repository.upsert_user_profile(user_id, version, profile_data)

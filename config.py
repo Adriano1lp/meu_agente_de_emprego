@@ -43,6 +43,10 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 AUTH_MODE = os.getenv("AUTH_MODE", "jwt").strip().lower() or "jwt"
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me").strip()
 JWT_EXPIRATION_MINUTES = int(os.getenv("JWT_EXPIRATION_MINUTES", "10080"))
+# TTLs da sessao web. O access curto vale so no modo cookie; o app segue JWT_EXPIRATION_MINUTES.
+WEB_ACCESS_TOKEN_MINUTES = int(os.getenv("WEB_ACCESS_TOKEN_MINUTES", "15"))
+REFRESH_TOKEN_IDLE_DAYS = int(os.getenv("REFRESH_TOKEN_IDLE_DAYS", "7"))
+REFRESH_FAMILY_MAX_DAYS = int(os.getenv("REFRESH_FAMILY_MAX_DAYS", "30"))
 PASSWORD_RESET_EXPIRATION_MINUTES = int(
     os.getenv("PASSWORD_RESET_EXPIRATION_MINUTES", "30")
 )

@@ -11,6 +11,9 @@ from fastapi import Header, HTTPException
 
 from config import AUTH_MODE, JWT_EXPIRATION_MINUTES, JWT_SECRET, sanitize_user_id
 
+# Verificador fixo em HS256. O alg do header nao escolhe o algoritmo.
+_ALLOWED_JWT_ALGORITHMS = ("HS256",)
+
 
 def get_bearer_user_id(
     authorization: str | None = Header(default=None, alias="Authorization"),
@@ -45,41 +48,68 @@ def create_access_token(
     user_id: str,
     email: str,
     display_name: str,
+    expires_in_minutes: int | None = None,
 ) -> str:
+    minutes = JWT_EXPIRATION_MINUTES if expires_in_minutes is None else expires_in_minutes
     now = int(time.time())
     payload = {
         "sub": sanitize_user_id(user_id),
         "user_id": sanitize_user_id(user_id),
         "email": email.strip().lower(),
         "display_name": display_name.strip(),
+        "typ": "access",
         "iat": now,
-        "exp": now + JWT_EXPIRATION_MINUTES * 60,
+        "exp": now + minutes * 60,
     }
     return _encode_jwt(payload)
 
 
 def decode_access_token(token: str) -> dict[str, Any]:
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise HTTPException(status_code=401, detail="JWT invalido")
+    """Decodifica um access JWT. Qualquer token malformado vira 401, nunca 500.
 
-    header_segment, payload_segment, signature_segment = parts
-    signed_data = f"{header_segment}.{payload_segment}".encode("ascii")
-    expected_signature = _sign(signed_data)
-    provided_signature = _urlsafe_b64decode(signature_segment)
+    Um unico try cobre split, ascii, base64, json e hmac. Refresh opaco nao
+    autentica como Bearer. A claim typ ausente ainda passa: e o JWT legado
+    do app, aceito so ate vencer.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3 or any(not part for part in parts):
+            raise HTTPException(status_code=401, detail="JWT invalido")
 
-    if not hmac.compare_digest(expected_signature, provided_signature):
-        raise HTTPException(status_code=401, detail="Assinatura JWT invalida")
+        header_segment, payload_segment, signature_segment = parts
+        signed_data = f"{header_segment}.{payload_segment}".encode("ascii")
+        header = json.loads(_urlsafe_b64decode(header_segment))
+        if (
+            not isinstance(header, dict)
+            or header.get("alg") not in _ALLOWED_JWT_ALGORITHMS
+            or header.get("typ") != "JWT"
+        ):
+            raise HTTPException(status_code=401, detail="JWT invalido")
 
-    payload = _decode_segment(payload_segment, "Payload JWT invalido")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=401, detail="Payload JWT invalido")
+        expected_signature = _sign(signed_data)
+        provided_signature = _urlsafe_b64decode(signature_segment)
+        if not hmac.compare_digest(expected_signature, provided_signature):
+            raise HTTPException(status_code=401, detail="JWT invalido")
 
-    exp = payload.get("exp")
-    if not isinstance(exp, int) or exp < int(time.time()):
-        raise HTTPException(status_code=401, detail="Token expirado")
+        payload = json.loads(_urlsafe_b64decode(payload_segment).decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=401, detail="JWT invalido")
+        # Sem claim typ o JWT legado do app continua valido. E temporario, ate
+        # esses tokens vencerem (JWT_EXPIRATION_MINUTES). typ presente e
+        # diferente de "access" continua 401.
+        if "typ" in payload and payload.get("typ") != "access":
+            raise HTTPException(status_code=401, detail="JWT invalido")
 
-    return payload
+        exp = payload.get("exp")
+        if isinstance(exp, bool) or not isinstance(exp, int):
+            raise HTTPException(status_code=401, detail="JWT invalido")
+        if exp < int(time.time()):
+            raise HTTPException(status_code=401, detail="Token expirado")
+        return payload
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="JWT invalido") from None
 
 
 def _get_user_id_from_custom_header(x_user_id: str | None) -> str:
@@ -146,14 +176,6 @@ def _sign(data: bytes) -> bytes:
 def _encode_segment(value: dict[str, Any]) -> str:
     raw = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     return _urlsafe_b64encode(raw)
-
-
-def _decode_segment(segment: str, error_message: str) -> Any:
-    try:
-        raw = _urlsafe_b64decode(segment)
-        return json.loads(raw.decode("utf-8"))
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail=error_message) from exc
 
 
 def _urlsafe_b64encode(value: bytes) -> str:
