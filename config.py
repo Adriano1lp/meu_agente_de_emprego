@@ -70,9 +70,11 @@ def _env_int(name: str, default: int) -> int:
 
 
 # Aceite temporario do JWT sem typ. A flag sai em deploy+8 dias; o codigo, em ate 2 semanas.
+# No deploy, JWT_LEGACY_UNTYPED_CUTOFF_ISO recebe o horario do deploy.
 JWT_ACCEPT_LEGACY_UNTYPED = _env_flag("JWT_ACCEPT_LEGACY_UNTYPED", True)
 JWT_LEGACY_UNTYPED_CUTOFF_ISO = os.getenv("JWT_LEGACY_UNTYPED_CUTOFF_ISO", "").strip()
 _REFRESH_RATE_LIMIT_PADRAO = 30
+_TRUST_PROXY_HOPS_PADRAO = 1
 AUTH_REFRESH_RATE_LIMIT_PER_IP = _env_int(
     "AUTH_REFRESH_RATE_LIMIT_PER_IP",
     _REFRESH_RATE_LIMIT_PADRAO,
@@ -80,6 +82,12 @@ AUTH_REFRESH_RATE_LIMIT_PER_IP = _env_int(
 AUTH_REFRESH_RATE_LIMIT_PER_FAMILY = _env_int(
     "AUTH_REFRESH_RATE_LIMIT_PER_FAMILY",
     _REFRESH_RATE_LIMIT_PADRAO,
+)
+# Limite por IP nasce desligado. O limite por familia nao tem interruptor.
+REFRESH_RATE_LIMIT_PER_IP_ENABLED = _env_flag("REFRESH_RATE_LIMIT_PER_IP_ENABLED", False)
+RATE_LIMIT_TRUST_PROXY_HOPS = _env_int(
+    "RATE_LIMIT_TRUST_PROXY_HOPS",
+    _TRUST_PROXY_HOPS_PADRAO,
 )
 
 PASSWORD_RESET_EXPIRATION_MINUTES = int(

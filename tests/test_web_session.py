@@ -1538,18 +1538,27 @@ def _cookie_de_login(client, email: str) -> str:
     )
 
 
-def _post_refresh(client, raw: str):
+def _post_refresh(client, raw: str, *, xff: str | None = None):
+    headers = _csrf_headers()
+    if xff is not None:
+        headers["X-Forwarded-For"] = xff
     return client.post(
         "/auth/refresh",
-        headers=_csrf_headers(),
+        headers=headers,
         cookies={"__Secure-mae_rt": raw},
     )
 
 
+def _liga_limite_de_ip(monkeypatch: pytest.MonkeyPatch, *, por_ip: int, por_familia: int) -> None:
+    monkeypatch.setattr("config.REFRESH_RATE_LIMIT_PER_IP_ENABLED", True)
+    monkeypatch.setattr("config.RATE_LIMIT_TRUST_PROXY_HOPS", 1)
+    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_IP", por_ip)
+    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_FAMILY", por_familia)
+
+
 def test_refresh_limite_por_ip_responde_429(isolated_db, monkeypatch):
     _allow_web_origin(monkeypatch)
-    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_IP", 1)
-    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_FAMILY", 30)
+    _liga_limite_de_ip(monkeypatch, por_ip=1, por_familia=30)
     from fastapi.testclient import TestClient
 
     app = _load_app()
@@ -1574,6 +1583,157 @@ def test_refresh_limite_por_ip_responde_429(isolated_db, monkeypatch):
 
     outro_ip = _post_refresh(outra, novo)
     assert outro_ip.status_code == 200
+
+
+def test_ips_distintos_atras_do_mesmo_proxy_nao_dividem_balde(isolated_db, monkeypatch):
+    _allow_web_origin(monkeypatch)
+    _liga_limite_de_ip(monkeypatch, por_ip=1, por_familia=30)
+    client = _client()
+    raw = _cookie_de_login(client, "proxy.dois.ips@example.com")
+
+    primeiro = _post_refresh(client, raw, xff="203.0.113.10")
+    assert primeiro.status_code == 200
+    girado = _assert_refresh_cookie(
+        _set_cookies(primeiro)[0],
+        max_age=REFRESH_TOKEN_IDLE_DAYS * 86400,
+    )
+
+    outro_cliente = _post_refresh(client, girado, xff="203.0.113.20")
+    assert outro_cliente.status_code == 200
+    seguinte = _assert_refresh_cookie(
+        _set_cookies(outro_cliente)[0],
+        max_age=REFRESH_TOKEN_IDLE_DAYS * 86400,
+    )
+
+    repetido = _post_refresh(client, seguinte, xff="203.0.113.10")
+    assert repetido.status_code == 429
+    assert repetido.json()["detail"] == "Muitas tentativas de refresh"
+    assert int(repetido.headers["retry-after"]) >= 1
+
+
+def test_xff_forjado_na_primeira_posicao_nao_contorna_limite(isolated_db, monkeypatch):
+    _allow_web_origin(monkeypatch)
+    _liga_limite_de_ip(monkeypatch, por_ip=1, por_familia=30)
+    client = _client()
+    raw = _cookie_de_login(client, "xff.forjado@example.com")
+
+    primeiro = _post_refresh(client, raw, xff="198.51.100.1, 203.0.113.10")
+    assert primeiro.status_code == 200
+    girado = _assert_refresh_cookie(
+        _set_cookies(primeiro)[0],
+        max_age=REFRESH_TOKEN_IDLE_DAYS * 86400,
+    )
+
+    forjado = _post_refresh(client, girado, xff="198.51.100.99, 203.0.113.10")
+    assert forjado.status_code == 429
+    assert _set_cookies(forjado) == []
+
+    outro_real = _post_refresh(client, girado, xff="198.51.100.1, 203.0.113.20")
+    assert outro_real.status_code == 200
+
+
+def test_limite_por_ip_desligado_por_padrao(isolated_db, monkeypatch):
+    _allow_web_origin(monkeypatch)
+    monkeypatch.setattr("config.REFRESH_RATE_LIMIT_PER_IP_ENABLED", False)
+    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_IP", 1)
+    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_FAMILY", 30)
+    client = _client()
+    raw = _cookie_de_login(client, "ip.desligado@example.com")
+    primeiro = _post_refresh(client, raw, xff="198.51.100.1, 203.0.113.10")
+    assert primeiro.status_code == 200
+    girado = _assert_refresh_cookie(
+        _set_cookies(primeiro)[0],
+        max_age=REFRESH_TOKEN_IDLE_DAYS * 86400,
+    )
+    segundo = _post_refresh(client, girado, xff="198.51.100.2, 203.0.113.10")
+    assert segundo.status_code == 200
+
+
+def test_csrf_antes_do_limite_e_da_consulta(isolated_db, monkeypatch):
+    _allow_web_origin(monkeypatch)
+    _liga_limite_de_ip(monkeypatch, por_ip=1, por_familia=1)
+    client = _client()
+    raw = _cookie_de_login(client, "csrf.antes.limite@example.com")
+    from database.repository import get_refresh_token_by_hash as consulta_real
+
+    consultas = {"n": 0}
+
+    def contar(token_hash: str):
+        consultas["n"] += 1
+        return consulta_real(token_hash)
+
+    monkeypatch.setattr("services.web_session.get_refresh_token_by_hash", contar)
+    sem_csrf = client.post("/auth/refresh", cookies={"__Secure-mae_rt": raw})
+    assert sem_csrf.status_code == 403
+    origem = client.post(
+        "/auth/refresh",
+        headers={"Origin": EVIL_ORIGIN, "X-MAE-CSRF": "1"},
+        cookies={"__Secure-mae_rt": raw},
+    )
+    assert origem.status_code == 403
+    assert consultas["n"] == 0
+
+    liberado = _post_refresh(client, raw)
+    assert liberado.status_code == 200
+    assert consultas["n"] >= 1
+
+
+def test_ip_do_limite_le_ultimo_hop_do_xff(monkeypatch):
+    from starlette.requests import Request
+
+    from services.refresh_rate_limit import client_ip_for_refresh_limit
+
+    def pedido(xff: str | None, peer: str = "10.0.0.8") -> Request:
+        headers: list[tuple[bytes, bytes]] = []
+        if xff is not None:
+            headers.append((b"x-forwarded-for", xff.encode("ascii")))
+        return Request(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/auth/refresh",
+                "raw_path": b"/auth/refresh",
+                "query_string": b"",
+                "headers": headers,
+                "client": (peer, 50000),
+                "server": ("test", 80),
+            }
+        )
+
+    monkeypatch.setattr("config.RATE_LIMIT_TRUST_PROXY_HOPS", 1)
+    assert client_ip_for_refresh_limit(pedido("198.51.100.7, 203.0.113.10")) == "203.0.113.10"
+    assert client_ip_for_refresh_limit(pedido(None)) == "10.0.0.8"
+    monkeypatch.setattr("config.RATE_LIMIT_TRUST_PROXY_HOPS", 2)
+    assert (
+        client_ip_for_refresh_limit(pedido("198.51.100.7, 203.0.113.10, 10.0.0.8"))
+        == "203.0.113.10"
+    )
+
+
+def test_baldes_tem_teto_lru(monkeypatch):
+    from services.refresh_rate_limit import (
+        _TETO_CHAVES,
+        _baldes,
+        consume_refresh_rate_limit,
+        reset_refresh_rate_limits,
+    )
+
+    assert _TETO_CHAVES == 10_000
+    monkeypatch.setattr("config.REFRESH_RATE_LIMIT_PER_IP_ENABLED", True)
+    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_IP", 5)
+    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_FAMILY", 5)
+    reset_refresh_rate_limits()
+    for indice in range(_TETO_CHAVES):
+        assert consume_refresh_rate_limit(client_ip=f"ip-{indice}", family_id=None) is None
+    assert consume_refresh_rate_limit(client_ip="ip-0", family_id=None) is None
+    assert consume_refresh_rate_limit(client_ip="ip-novo", family_id=None) is None
+    assert len(_baldes) == _TETO_CHAVES
+    assert "ip:ip-0" in _baldes
+    assert "ip:ip-novo" in _baldes
+    assert "ip:ip-1" not in _baldes
 
 
 def test_refresh_limite_por_familia_responde_429(isolated_db, monkeypatch):
