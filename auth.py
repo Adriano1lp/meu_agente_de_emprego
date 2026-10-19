@@ -5,10 +5,12 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Header, HTTPException
 
+import config
 from config import AUTH_MODE, JWT_EXPIRATION_MINUTES, JWT_SECRET, sanitize_user_id
 
 # Verificador fixo em HS256. O alg do header nao escolhe o algoritmo.
@@ -68,8 +70,8 @@ def decode_access_token(token: str) -> dict[str, Any]:
     """Decodifica um access JWT. Qualquer token malformado vira 401, nunca 500.
 
     Um unico try cobre split, ascii, base64, json e hmac. Refresh opaco nao
-    autentica como Bearer. A claim typ ausente ainda passa: e o JWT legado
-    do app, aceito so ate vencer.
+    autentica como Bearer. Sem a claim typ, o JWT legado so passa com a flag
+    ligada e, se houver corte, com iat anterior a ele.
     """
     try:
         parts = token.split(".")
@@ -94,10 +96,9 @@ def decode_access_token(token: str) -> dict[str, Any]:
         payload = json.loads(_urlsafe_b64decode(payload_segment).decode("utf-8"))
         if not isinstance(payload, dict):
             raise HTTPException(status_code=401, detail="JWT invalido")
-        # Sem claim typ o JWT legado do app continua valido. E temporario, ate
-        # esses tokens vencerem (JWT_EXPIRATION_MINUTES). typ presente e
-        # diferente de "access" continua 401.
-        if "typ" in payload and payload.get("typ") != "access":
+        # typ diferente de "access" e sempre 401. Sem typ, so o legado
+        # temporario: flag ligada e iat anterior ao corte, se o corte existir.
+        if not _payload_typ_permitido(payload):
             raise HTTPException(status_code=401, detail="JWT invalido")
 
         exp = payload.get("exp")
@@ -110,6 +111,44 @@ def decode_access_token(token: str) -> dict[str, Any]:
         raise
     except Exception:
         raise HTTPException(status_code=401, detail="JWT invalido") from None
+
+
+_CORTE_AUSENTE = object()
+_CORTE_INVALIDO = object()
+
+
+def _payload_typ_permitido(payload: dict[str, Any]) -> bool:
+    if "typ" in payload:
+        return payload.get("typ") == "access"
+    return _legado_sem_typ_permitido(payload)
+
+
+def _legado_sem_typ_permitido(payload: dict[str, Any]) -> bool:
+    if not config.JWT_ACCEPT_LEGACY_UNTYPED:
+        return False
+    corte = _corte_legado_sem_typ()
+    if corte is _CORTE_INVALIDO:
+        return False
+    if corte is _CORTE_AUSENTE:
+        return True
+    iat = payload.get("iat")
+    if isinstance(iat, bool) or not isinstance(iat, (int, float)):
+        return False
+    emitido = datetime.fromtimestamp(float(iat), tz=UTC)
+    return emitido < corte
+
+
+def _corte_legado_sem_typ() -> datetime | object:
+    bruto = (config.JWT_LEGACY_UNTYPED_CUTOFF_ISO or "").strip()
+    if not bruto:
+        return _CORTE_AUSENTE
+    try:
+        parsed = datetime.fromisoformat(bruto)
+    except ValueError:
+        return _CORTE_INVALIDO
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _get_user_id_from_custom_header(x_user_id: str | None) -> str:

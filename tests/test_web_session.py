@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 import auth
+import config
 from config import (
     CURRENT_PRIVACY_VERSION,
     CURRENT_TERMS_VERSION,
@@ -1299,3 +1300,315 @@ def _is_rotation_update(sql: str) -> bool:
         and "used_at IS NULL" in compact
         and "revoked_at IS NULL" in compact
     )
+
+
+def _token_legado(
+    user: dict[str, object],
+    *,
+    iat: int | None = None,
+    typ: str | None = None,
+) -> str:
+    payload: dict[str, object] = {
+        "sub": user["user_id"],
+        "user_id": user["user_id"],
+        "email": user["email"],
+        "display_name": user["display_name"],
+        "exp": int(time.time()) + 3600,
+    }
+    if iat is not None:
+        payload["iat"] = iat
+    if typ is not None:
+        payload["typ"] = typ
+    return auth._encode_jwt(payload)
+
+
+def _usuario_registrado(client, email: str) -> dict[str, object]:
+    registered = _register(client, email)
+    assert registered.status_code == 200
+    return registered.json()["user"]
+
+
+@pytest.mark.parametrize(
+    ("bruto", "esperado"),
+    [
+        (None, True),
+        ("", True),
+        ("true", True),
+        ("on", True),
+        ("false", False),
+        ("0", False),
+        ("off", False),
+    ],
+)
+def test_flag_legado_interpreta_bool(monkeypatch, bruto: str | None, esperado: bool):
+    if bruto is None:
+        monkeypatch.delenv("JWT_ACCEPT_LEGACY_UNTYPED", raising=False)
+    else:
+        monkeypatch.setenv("JWT_ACCEPT_LEGACY_UNTYPED", bruto)
+    assert config._env_flag("JWT_ACCEPT_LEGACY_UNTYPED", True) is esperado
+
+
+@pytest.mark.parametrize("path", ["/auth/me", "/users/me"])
+def test_jwt_legado_aceito_com_flag_ligada_sem_corte(isolated_db, monkeypatch, path: str):
+    monkeypatch.setattr("config.JWT_ACCEPT_LEGACY_UNTYPED", True)
+    monkeypatch.setattr("config.JWT_LEGACY_UNTYPED_CUTOFF_ISO", "")
+    client = _client()
+    user = _usuario_registrado(client, "legado.ligado@example.com")
+    token = _token_legado(user, iat=int(time.time()) - 30)
+    response = client.get(path, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/auth/me", "/users/me"])
+def test_jwt_legado_recusado_com_flag_desligada(isolated_db, monkeypatch, path: str):
+    monkeypatch.setattr("config.JWT_ACCEPT_LEGACY_UNTYPED", False)
+    monkeypatch.setattr("config.JWT_LEGACY_UNTYPED_CUTOFF_ISO", "")
+    client = _client()
+    user = _usuario_registrado(client, "legado.desligado@example.com")
+    typed = client.get(
+        path,
+        headers={"Authorization": f"Bearer {_token_legado(user, iat=int(time.time()), typ='access')}"},
+    )
+    assert typed.status_code == 200
+    legacy = client.get(
+        path,
+        headers={"Authorization": f"Bearer {_token_legado(user, iat=int(time.time()) - 30)}"},
+    )
+    assert legacy.status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/auth/me", "/users/me"])
+@pytest.mark.parametrize(
+    ("ajuste", "esperado"),
+    [
+        (-1, 200),
+        (0, 401),
+        (30, 401),
+    ],
+)
+def test_jwt_legado_aceito_ou_recusado_pelo_corte(
+    isolated_db,
+    monkeypatch,
+    path: str,
+    ajuste: int,
+    esperado: int,
+):
+    monkeypatch.setattr("config.JWT_ACCEPT_LEGACY_UNTYPED", True)
+    iat_corte = int(time.time()) - 180
+    monkeypatch.setattr(
+        "config.JWT_LEGACY_UNTYPED_CUTOFF_ISO",
+        datetime.fromtimestamp(iat_corte, tz=UTC).isoformat(),
+    )
+    client = _client()
+    user = _usuario_registrado(client, "legado.corte@example.com")
+    token = _token_legado(user, iat=iat_corte + ajuste)
+    response = client.get(path, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == esperado
+
+
+@pytest.mark.parametrize("path", ["/auth/me", "/users/me"])
+def test_jwt_legado_sem_iat_recusado_quando_ha_corte(isolated_db, monkeypatch, path: str):
+    monkeypatch.setattr("config.JWT_ACCEPT_LEGACY_UNTYPED", True)
+    monkeypatch.setattr(
+        "config.JWT_LEGACY_UNTYPED_CUTOFF_ISO",
+        datetime.fromtimestamp(int(time.time()) - 60, tz=UTC).isoformat(),
+    )
+    client = _client()
+    user = _usuario_registrado(client, "legado.sem.iat@example.com")
+    token = _token_legado(user, iat=None)
+    response = client.get(path, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/auth/me", "/users/me"])
+def test_jwt_legado_recusado_com_flag_desligada_mesmo_antes_do_corte(
+    isolated_db,
+    monkeypatch,
+    path: str,
+):
+    iat = int(time.time()) - 300
+    monkeypatch.setattr("config.JWT_ACCEPT_LEGACY_UNTYPED", False)
+    monkeypatch.setattr(
+        "config.JWT_LEGACY_UNTYPED_CUTOFF_ISO",
+        datetime.fromtimestamp(iat + 60, tz=UTC).isoformat(),
+    )
+    client = _client()
+    user = _usuario_registrado(client, "legado.flag.vence.corte@example.com")
+    response = client.get(
+        path,
+        headers={"Authorization": f"Bearer {_token_legado(user, iat=iat)}"},
+    )
+    assert response.status_code == 401
+
+
+def test_corte_ingenuo_vale_como_utc_e_corte_invalido_recusa_legado(isolated_db, monkeypatch):
+    monkeypatch.setattr("config.JWT_ACCEPT_LEGACY_UNTYPED", True)
+    iat = int(time.time()) - 90
+    monkeypatch.setattr(
+        "config.JWT_LEGACY_UNTYPED_CUTOFF_ISO",
+        datetime.fromtimestamp(iat, tz=UTC).replace(tzinfo=None).isoformat(),
+    )
+    client = _client()
+    user = _usuario_registrado(client, "legado.naive@example.com")
+    igual = client.get(
+        "/auth/me",
+        headers={"Authorization": f"Bearer {_token_legado(user, iat=iat)}"},
+    )
+    anterior = client.get(
+        "/auth/me",
+        headers={"Authorization": f"Bearer {_token_legado(user, iat=iat - 1)}"},
+    )
+    assert igual.status_code == 401
+    assert anterior.status_code == 200
+
+    monkeypatch.setattr("config.JWT_LEGACY_UNTYPED_CUTOFF_ISO", "invalido")
+    recusado = client.get(
+        "/users/me",
+        headers={"Authorization": f"Bearer {_token_legado(user, iat=iat - 1)}"},
+    )
+    assert recusado.status_code == 401
+    access = _register(client, "tipado.corte.invalido@example.com").json()["access_token"]
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {access}"}).status_code == 200
+    assert client.get("/users/me", headers={"Authorization": f"Bearer {access}"}).status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/auth/me", "/users/me"])
+def test_jwt_typ_diferente_de_access_continua_401(isolated_db, monkeypatch, path: str):
+    monkeypatch.setattr("config.JWT_ACCEPT_LEGACY_UNTYPED", True)
+    monkeypatch.setattr("config.JWT_LEGACY_UNTYPED_CUTOFF_ISO", "")
+    client = _client()
+    user = _usuario_registrado(client, "typ.refresh@example.com")
+    response = client.get(
+        path,
+        headers={"Authorization": f"Bearer {_token_legado(user, iat=int(time.time()), typ='refresh')}"},
+    )
+    assert response.status_code == 401
+
+
+def test_me_envia_cache_control_no_store(isolated_db):
+    client = _client()
+    registered = _register(client, "nostore.me@example.com")
+    assert registered.status_code == 200
+    headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+    for path in ("/auth/me", "/users/me"):
+        ok = client.get(path, headers=headers)
+        assert ok.status_code == 200
+        assert ok.headers["cache-control"] == "no-store"
+        anonimo = client.get(path)
+        assert anonimo.status_code == 401
+        assert anonimo.headers["cache-control"] == "no-store"
+
+    status = client.get("/users/me/status", headers=headers)
+    assert status.status_code == 200
+    assert status.headers.get("cache-control") != "no-store"
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.headers.get("cache-control") != "no-store"
+
+
+def test_preflight_aceita_header_x_mae_client(isolated_db, monkeypatch):
+    _allow_web_origin(monkeypatch)
+    client = _client()
+    response = client.options(
+        "/auth/login",
+        headers={
+            "Origin": ORIGIN,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-mae-csrf,x-mae-client",
+        },
+    )
+    assert response.status_code == 200
+    nomes = {
+        item.strip().lower()
+        for item in response.headers["access-control-allow-headers"].split(",")
+    }
+    assert "x-mae-client" in nomes
+    assert "*" not in response.headers["access-control-allow-headers"]
+    assert response.headers["access-control-allow-origin"] == ORIGIN
+    assert response.headers["access-control-allow-credentials"] == "true"
+
+
+def _cookie_de_login(client, email: str) -> str:
+    assert _register(client, email).status_code == 200
+    login = _login(client, email, headers=_csrf_headers(), session="cookie")
+    assert login.status_code == 200
+    return _assert_refresh_cookie(
+        _set_cookies(login)[0],
+        max_age=REFRESH_TOKEN_IDLE_DAYS * 86400,
+    )
+
+
+def _post_refresh(client, raw: str):
+    return client.post(
+        "/auth/refresh",
+        headers=_csrf_headers(),
+        cookies={"__Secure-mae_rt": raw},
+    )
+
+
+def test_refresh_limite_por_ip_responde_429(isolated_db, monkeypatch):
+    _allow_web_origin(monkeypatch)
+    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_IP", 1)
+    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_FAMILY", 30)
+    from fastapi.testclient import TestClient
+
+    app = _load_app()
+    casa = TestClient(app, client=("203.0.113.10", 50000))
+    outra = TestClient(app, client=("203.0.113.20", 50000))
+    raw = _cookie_de_login(casa, "limite.ip@example.com")
+
+    primeiro = _post_refresh(casa, raw)
+    assert primeiro.status_code == 200
+    novo = _assert_refresh_cookie(
+        _set_cookies(primeiro)[0],
+        max_age=REFRESH_TOKEN_IDLE_DAYS * 86400,
+    )
+
+    bloqueado = _post_refresh(casa, novo)
+    assert bloqueado.status_code == 429
+    assert bloqueado.json()["detail"] == "Muitas tentativas de refresh"
+    espera = int(bloqueado.headers["retry-after"])
+    assert 1 <= espera <= 60
+    assert _set_cookies(bloqueado) == []
+    assert bloqueado.headers["cache-control"] == "no-store"
+
+    outro_ip = _post_refresh(outra, novo)
+    assert outro_ip.status_code == 200
+
+
+def test_refresh_limite_por_familia_responde_429(isolated_db, monkeypatch):
+    _allow_web_origin(monkeypatch)
+    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_IP", 30)
+    monkeypatch.setattr("config.AUTH_REFRESH_RATE_LIMIT_PER_FAMILY", 1)
+    client = _client()
+    raw_a = _cookie_de_login(client, "familia.a@example.com")
+    raw_b = _cookie_de_login(client, "familia.b@example.com")
+
+    primeiro = _post_refresh(client, raw_a)
+    assert primeiro.status_code == 200
+    novo_a = _assert_refresh_cookie(
+        _set_cookies(primeiro)[0],
+        max_age=REFRESH_TOKEN_IDLE_DAYS * 86400,
+    )
+    assert _rows(isolated_db)
+    assert next(
+        row["used_at"] for row in _rows(isolated_db) if row["token_hash"] == _sha256(novo_a)
+    ) is None
+
+    bloqueado = _post_refresh(client, novo_a)
+    assert bloqueado.status_code == 429
+    assert bloqueado.json()["detail"] == "Muitas tentativas de refresh"
+    assert int(bloqueado.headers["retry-after"]) >= 1
+    assert _set_cookies(bloqueado) == []
+    assert next(
+        row["used_at"] for row in _rows(isolated_db) if row["token_hash"] == _sha256(novo_a)
+    ) is None
+
+    outra_familia = _post_refresh(client, raw_b)
+    assert outra_familia.status_code == 200
+
+    from services.refresh_rate_limit import reset_refresh_rate_limits
+
+    reset_refresh_rate_limits()
+    de_novo = _post_refresh(client, novo_a)
+    assert de_novo.status_code == 200

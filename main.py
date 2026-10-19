@@ -90,6 +90,7 @@ from services.user_data import (
     save_user_cv,
     save_user_profile,
 )
+from services.refresh_rate_limit import consume_refresh_rate_limit
 from services.web_session import (
     REFRESH_COOKIE_NAME,
     clear_refresh_cookie_header,
@@ -99,6 +100,7 @@ from services.web_session import (
     logout_web_session,
     refresh_cookie_header,
     refresh_cookie_max_age,
+    refresh_family_id,
     refresh_web_session,
 )
 
@@ -130,6 +132,8 @@ _AUTH_NO_STORE_PATHS = {
     "/auth/register",
     "/auth/refresh",
     "/auth/logout",
+    "/auth/me",
+    "/users/me",
 }
 
 
@@ -400,6 +404,16 @@ def auth_refresh(
     origin: str | None = Header(default=None, alias="Origin"),
     x_mae_csrf: str | None = Header(default=None, alias="X-MAE-CSRF"),
 ) -> Response:
+    retry_after = consume_refresh_rate_limit(
+        client_ip=_client_ip(request),
+        family_id=refresh_family_id(request.cookies.get(REFRESH_COOKIE_NAME)),
+    )
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail="Muitas tentativas de refresh",
+            headers={"Retry-After": str(retry_after)},
+        )
     enforce_cookie_csrf(origin, x_mae_csrf)
     try:
         body, raw_token = refresh_web_session(request.cookies.get(REFRESH_COOKIE_NAME))
@@ -432,6 +446,13 @@ def auth_logout(
     response = Response(status_code=204)
     response.headers.append("set-cookie", clear_refresh_cookie_header())
     return response
+
+
+def _client_ip(request: Request) -> str:
+    client = request.client
+    if client is None or not client.host:
+        return "desconhecido"
+    return client.host
 
 
 def _auth_session_response(user: dict[str, Any], *, cookie_mode: bool) -> Response:

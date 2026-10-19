@@ -11,6 +11,15 @@ os.environ["AUTH_MODE"] = "jwt"
 os.environ["MONGODB_URI"] = ""
 
 
+@pytest.fixture(autouse=True)
+def _zera_limite_refresh():
+    from services.refresh_rate_limit import reset_refresh_rate_limits
+
+    reset_refresh_rate_limits()
+    yield
+    reset_refresh_rate_limits()
+
+
 @pytest.fixture
 def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     db_path = tmp_path / "app.db"

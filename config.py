@@ -47,6 +47,41 @@ JWT_EXPIRATION_MINUTES = int(os.getenv("JWT_EXPIRATION_MINUTES", "10080"))
 WEB_ACCESS_TOKEN_MINUTES = int(os.getenv("WEB_ACCESS_TOKEN_MINUTES", "15"))
 REFRESH_TOKEN_IDLE_DAYS = int(os.getenv("REFRESH_TOKEN_IDLE_DAYS", "7"))
 REFRESH_FAMILY_MAX_DAYS = int(os.getenv("REFRESH_FAMILY_MAX_DAYS", "30"))
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        parsed = int(raw.strip())
+    except ValueError:
+        return default
+    if parsed < 0:
+        return default
+    return parsed
+
+
+# Aceite temporario do JWT sem typ. A flag sai em deploy+8 dias; o codigo, em ate 2 semanas.
+JWT_ACCEPT_LEGACY_UNTYPED = _env_flag("JWT_ACCEPT_LEGACY_UNTYPED", True)
+JWT_LEGACY_UNTYPED_CUTOFF_ISO = os.getenv("JWT_LEGACY_UNTYPED_CUTOFF_ISO", "").strip()
+_REFRESH_RATE_LIMIT_PADRAO = 30
+AUTH_REFRESH_RATE_LIMIT_PER_IP = _env_int(
+    "AUTH_REFRESH_RATE_LIMIT_PER_IP",
+    _REFRESH_RATE_LIMIT_PADRAO,
+)
+AUTH_REFRESH_RATE_LIMIT_PER_FAMILY = _env_int(
+    "AUTH_REFRESH_RATE_LIMIT_PER_FAMILY",
+    _REFRESH_RATE_LIMIT_PADRAO,
+)
+
 PASSWORD_RESET_EXPIRATION_MINUTES = int(
     os.getenv("PASSWORD_RESET_EXPIRATION_MINUTES", "30")
 )
