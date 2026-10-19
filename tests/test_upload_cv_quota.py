@@ -152,6 +152,7 @@ def _saved_cv_fields(body: dict, session: dict) -> None:
     assert "cv_file" not in body
     assert "original_file" not in body
     assert "object_key" not in body
+    assert "extracted_text_object_key" not in body
     embeddings = body.get("embeddings")
     if isinstance(embeddings, dict):
         assert "chroma_dir" not in embeddings

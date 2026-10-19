@@ -112,6 +112,7 @@ def _save_cv_with_internal_fields(monkeypatch):
         saved["cv_file"] = SECRET_CV_PATH
         saved["original_file"] = SECRET_ORIGINAL
         saved["object_key"] = SECRET_OBJECT_KEY
+        saved["extracted_text_object_key"] = SECRET_OBJECT_KEY
         return saved
 
     monkeypatch.setattr("main.save_user_cv", save)
@@ -176,6 +177,7 @@ def _assert_upload_hides_internal_fields(body: dict) -> None:
     assert "cv_file" not in body
     assert "original_file" not in body
     assert "object_key" not in body
+    assert "extracted_text_object_key" not in body
     assert SECRET_CV_PATH not in str(body)
     assert SECRET_ORIGINAL not in str(body)
     assert SECRET_OBJECT_KEY not in str(body)
@@ -482,6 +484,8 @@ def test_manual_profile_embeddings_hide_internal_paths(isolated_db, monkeypatch)
     )
     assert response.status_code == 200
     body = response.json()
+    assert "cv_file" not in body
+    assert "object_key" not in body
     embeddings = body["embeddings"]
     assert embeddings["chunks"] == 2
     assert embeddings["embedding_run_id"] == "run-manual"

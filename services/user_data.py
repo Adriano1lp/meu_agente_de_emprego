@@ -92,7 +92,6 @@ def save_user_cv(upload_file: UploadFile, user_id: str) -> dict[str, Any]:
         "content_type": upload_file.content_type or "application/octet-stream",
         "bytes_received": file_size,
         "updated_at": updated_at,
-        "extracted_text_object_key": extracted_text_object_key,
     }
 
 
@@ -165,8 +164,6 @@ def save_manual_profile(profile_data: dict[str, Any], user_id: str) -> dict[str,
     return {
         **saved_profile,
         "document_id": document_id,
-        "cv_file": str(cv_file),
-        "object_key": object_key,
     }
 
 

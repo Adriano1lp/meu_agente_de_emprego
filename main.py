@@ -604,7 +604,11 @@ def create_manual_profile(
     payload = profile.model_dump(exclude_none=True)
     saved = save_manual_profile(payload, user_id)
     embeddings = _public_embeddings_response(rebuild_vectorstore_for_user(user_id))
-    return {**saved, "embeddings": embeddings, "ready_for_analysis": True}
+    return {
+        **_without_hidden_fields(saved, _MANUAL_PROFILE_HIDDEN_FIELDS),
+        "embeddings": embeddings,
+        "ready_for_analysis": True,
+    }
 
 
 @app.get("/users/me/status")
@@ -985,7 +989,13 @@ def _user_has_embeddings(user_id: str, chroma_dir: Path | None = None) -> bool:
     return directory.exists() and any(directory.iterdir())
 
 
-_UPLOAD_CV_HIDDEN_FIELDS = frozenset({"cv_file", "original_file", "object_key"})
+_UPLOAD_CV_HIDDEN_FIELDS = frozenset({
+    "cv_file",
+    "original_file",
+    "object_key",
+    "extracted_text_object_key",
+})
+_MANUAL_PROFILE_HIDDEN_FIELDS = frozenset({"cv_file", "object_key"})
 _EMBEDDING_HIDDEN_FIELDS = frozenset({"chroma_dir", "vector_store", "cv_file"})
 
 
