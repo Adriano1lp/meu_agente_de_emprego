@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import sqlite3
 import sys
@@ -898,6 +899,95 @@ def test_bearer_malformado_sempre_401(isolated_db, case: str, path: str):
 
     response = _client().get(path, headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
+
+
+def _legacy_access_token(
+    *,
+    user_id: str,
+    email: str,
+    display_name: str,
+    exp: int | None = None,
+    alg: str = "HS256",
+    typ: str | None = None,
+    include_typ: bool = False,
+) -> str:
+    now = int(time.time())
+    payload: dict[str, object] = {
+        "sub": user_id,
+        "user_id": user_id,
+        "email": email,
+        "display_name": display_name,
+        "iat": now - 60,
+        "exp": now + 3600 if exp is None else exp,
+    }
+    if include_typ:
+        payload["typ"] = typ
+    if alg == "HS256":
+        return auth._encode_jwt(payload)
+    return _signed_token({"alg": alg, "typ": "JWT"}, auth._encode_segment(payload))
+
+
+@pytest.mark.parametrize("path", ["/auth/me", "/users/me"])
+def test_jwt_legado_sem_typ_valido_da_200(isolated_db, path: str):
+    client = _client()
+    email = "legado.valido@example.com"
+    registered = _register(client, email)
+    assert registered.status_code == 200
+    user = registered.json()["user"]
+    token = _legacy_access_token(
+        user_id=user["user_id"],
+        email=user["email"],
+        display_name=user["display_name"],
+    )
+    payload_segment = token.split(".")[1]
+    payload = json.loads(auth._urlsafe_b64decode(payload_segment))
+    assert "typ" not in payload
+
+    response = client.get(path, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/auth/me", "/users/me"])
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        ("typ_diferente", 401),
+        ("vencido", 401),
+        ("alg_diferente", 401),
+    ],
+)
+def test_jwt_legado_invalido_da_401(isolated_db, path: str, kind: str, expected: int):
+    client = _client()
+    email = "legado.invalido@example.com"
+    registered = _register(client, email)
+    assert registered.status_code == 200
+    user = registered.json()["user"]
+    now = int(time.time())
+    if kind == "typ_diferente":
+        token = _legacy_access_token(
+            user_id=user["user_id"],
+            email=user["email"],
+            display_name=user["display_name"],
+            include_typ=True,
+            typ="refresh",
+        )
+    elif kind == "vencido":
+        token = _legacy_access_token(
+            user_id=user["user_id"],
+            email=user["email"],
+            display_name=user["display_name"],
+            exp=now - 60,
+        )
+    else:
+        token = _legacy_access_token(
+            user_id=user["user_id"],
+            email=user["email"],
+            display_name=user["display_name"],
+            alg="HS384",
+        )
+
+    response = client.get(path, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == expected
 
 
 def test_refresh_opaco_nao_serve_como_bearer(isolated_db, monkeypatch):

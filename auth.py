@@ -68,7 +68,8 @@ def decode_access_token(token: str) -> dict[str, Any]:
     """Decodifica um access JWT. Qualquer token malformado vira 401, nunca 500.
 
     Um unico try cobre split, ascii, base64, json e hmac. Refresh opaco nao
-    tem typ access e portanto nao autentica como Bearer.
+    autentica como Bearer. A claim typ ausente ainda passa: e o JWT legado
+    do app, aceito so ate vencer.
     """
     try:
         parts = token.split(".")
@@ -91,7 +92,12 @@ def decode_access_token(token: str) -> dict[str, Any]:
             raise HTTPException(status_code=401, detail="JWT invalido")
 
         payload = json.loads(_urlsafe_b64decode(payload_segment).decode("utf-8"))
-        if not isinstance(payload, dict) or payload.get("typ") != "access":
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=401, detail="JWT invalido")
+        # Sem claim typ o JWT legado do app continua valido. E temporario, ate
+        # esses tokens vencerem (JWT_EXPIRATION_MINUTES). typ presente e
+        # diferente de "access" continua 401.
+        if "typ" in payload and payload.get("typ") != "access":
             raise HTTPException(status_code=401, detail="JWT invalido")
 
         exp = payload.get("exp")

@@ -35,11 +35,14 @@ O backend ainda mantem suporte ao header legado `X-User-Id` quando `AUTH_MODE` n
 O token emitido pela API:
 
 - e assinado com HMAC SHA-256, sempre com `alg` HS256
-- carrega `sub`, `user_id`, `email`, `display_name`, `typ` (`access`), `iat` e `exp`
+- carrega `sub`, `user_id`, `email`, `display_name`, `iat` e `exp`
+- tokens novos tambem carregam `typ` `access`
 - no app, respeita `JWT_EXPIRATION_MINUTES`
 - na web, no modo cookie, respeita `WEB_ACCESS_TOKEN_MINUTES`
 
-`exp` e obrigatorio. Token malformado, com `alg` diferente de HS256, sem `typ` `access`, ou com bytes nao ASCII responde `401`. O refresh opaco nao vale como Bearer.
+`exp` e obrigatorio. Token malformado, com `alg` diferente de HS256, com `typ` presente e diferente de `access`, ou com bytes nao ASCII responde `401`. O refresh opaco nao vale como Bearer, e um JWT nao vale como refresh.
+
+Follow-up: o JWT legado do app, emitido sem a claim `typ`, continua aceito enquanto a assinatura, o `alg` HS256 e o `exp` forem validos. Isso dura no maximo `JWT_EXPIRATION_MINUTES` apos o deploy. Quando esses tokens tiverem vencido, a API deve passar a exigir `typ` `access`.
 
 ## 1. Health check
 
