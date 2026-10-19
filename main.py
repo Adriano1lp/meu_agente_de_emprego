@@ -90,6 +90,10 @@ from services.user_data import (
     save_user_cv,
     save_user_profile,
 )
+from services.refresh_rate_limit import (
+    client_ip_for_refresh_limit,
+    consume_refresh_rate_limit,
+)
 from services.web_session import (
     REFRESH_COOKIE_NAME,
     clear_refresh_cookie_header,
@@ -99,6 +103,7 @@ from services.web_session import (
     logout_web_session,
     refresh_cookie_header,
     refresh_cookie_max_age,
+    refresh_family_id,
     refresh_web_session,
 )
 
@@ -130,6 +135,8 @@ _AUTH_NO_STORE_PATHS = {
     "/auth/register",
     "/auth/refresh",
     "/auth/logout",
+    "/auth/me",
+    "/users/me",
 }
 
 
@@ -401,6 +408,16 @@ def auth_refresh(
     x_mae_csrf: str | None = Header(default=None, alias="X-MAE-CSRF"),
 ) -> Response:
     enforce_cookie_csrf(origin, x_mae_csrf)
+    retry_after = consume_refresh_rate_limit(
+        client_ip=client_ip_for_refresh_limit(request),
+        family_id=refresh_family_id(request.cookies.get(REFRESH_COOKIE_NAME)),
+    )
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail="Muitas tentativas de refresh",
+            headers={"Retry-After": str(retry_after)},
+        )
     try:
         body, raw_token = refresh_web_session(request.cookies.get(REFRESH_COOKIE_NAME))
     except HTTPException as exc:

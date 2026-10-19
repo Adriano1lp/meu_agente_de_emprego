@@ -91,6 +91,20 @@ def issue_web_session(user: dict[str, Any]) -> tuple[dict[str, Any], str]:
     return body, raw_token
 
 
+def refresh_family_id(raw_token: str | None) -> str | None:
+    """Familia do cookie, se o token existir. Nao rotaciona e nao registra o segredo."""
+    presented = (raw_token or "").strip()
+    if not presented or _is_access_jwt(presented):
+        return None
+    row = get_refresh_token_by_hash(_hash_refresh_token(presented))
+    if not row:
+        return None
+    family_id = row.get("family_id")
+    if not isinstance(family_id, str) or not family_id.strip():
+        return None
+    return family_id
+
+
 def refresh_web_session(raw_token: str | None) -> tuple[dict[str, Any], str]:
     """Rotaciona o refresh. Servidor estrito: reuso revoga a familia, sem folga."""
     presented = (raw_token or "").strip()

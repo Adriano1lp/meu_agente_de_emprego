@@ -6,7 +6,7 @@ import config
 
 # Metodos e headers explicitos. O dominio da web vem de CORS_ALLOW_ORIGINS.
 CORS_ALLOW_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
-CORS_ALLOW_HEADERS = ("Authorization", "Content-Type", "X-MAE-CSRF")
+CORS_ALLOW_HEADERS = ("Authorization", "Content-Type", "X-MAE-CSRF", "X-MAE-Client")
 
 
 class DynamicCORSMiddleware(CORSMiddleware):

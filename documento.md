@@ -42,7 +42,7 @@ O token emitido pela API:
 
 `exp` e obrigatorio. Token malformado, com `alg` diferente de HS256, com `typ` presente e diferente de `access`, ou com bytes nao ASCII responde `401`. O refresh opaco nao vale como Bearer, e um JWT nao vale como refresh.
 
-Follow-up: o JWT legado do app, emitido sem a claim `typ`, continua aceito enquanto a assinatura, o `alg` HS256 e o `exp` forem validos. Isso dura no maximo `JWT_EXPIRATION_MINUTES` apos o deploy. Quando esses tokens tiverem vencido, a API deve passar a exigir `typ` `access`.
+JWT legado sem `typ`: aceito somente com `JWT_ACCEPT_LEGACY_UNTYPED` ligada e, quando `JWT_LEGACY_UNTYPED_CUTOFF_ISO` estiver definido, com `iat` anterior a esse corte. Caso contrario, `401`. No deploy, `JWT_LEGACY_UNTYPED_CUTOFF_ISO` recebe o horario do deploy. A flag deve ser desligada em deploy+8 dias e o codigo removido em ate 2 semanas.
 
 ## 1. Health check
 
@@ -185,15 +185,15 @@ Set-Cookie: __Secure-mae_rt=<opaco>; Max-Age=<REFRESH_TOKEN_IDLE_DAYS em segundo
 
 Nao ha atributo `Domain` (cookie host-only). O valor opaco nao volta no JSON. No banco fica so o SHA-256, sem IP e sem user agent. A familia vive no maximo `REFRESH_FAMILY_MAX_DAYS`; a ociosidade `REFRESH_TOKEN_IDLE_DAYS` renova a cada rotacao e `family_expires_at` nao e estendido.
 
-`POST /auth/refresh` nao tem body. Le o cookie, exige o mesmo Origin e `X-MAE-CSRF`, devolve `{access_token, token_type, expires_in}` e rotaciona o cookie. O access novo sai do usuario ativo no banco. Falha (expirado, revogado, reutilizado, usuario ausente ou inativo) responde `401` com `Sessao invalida`, limpa o cookie com os mesmos atributos e `Max-Age=0` e, no reuso, revoga a familia inteira. Servidor estrito, sem janela de graca. Termos desatualizados nao bloqueiam o refresh.
+`POST /auth/refresh` nao tem body. Le o cookie, exige o mesmo Origin e `X-MAE-CSRF`, devolve `{access_token, token_type, expires_in}` e rotaciona o cookie. O access novo sai do usuario ativo no banco. Falha (expirado, revogado, reutilizado, usuario ausente ou inativo) responde `401` com `Sessao invalida`, limpa o cookie com os mesmos atributos e `Max-Age=0` e, no reuso, revoga a familia inteira. Servidor estrito, sem janela de graca. Termos desatualizados nao bloqueiam o refresh. Origin e `X-MAE-CSRF` sao checados antes do limite e antes de consultar o banco. Excesso de chamadas por familia, e por IP quando `REFRESH_RATE_LIMIT_PER_IP_ENABLED` esta ligada, responde `429` com `Retry-After`, sem rotacionar o cookie. O IP desse limite e a ultima entrada de `X-Forwarded-For` acrescentada pelo proxy (`RATE_LIMIT_TRUST_PROXY_HOPS`); sem o header, vale o peer. O limite vale por processo.
 
 `POST /auth/logout` tem as mesmas checagens, responde `204` mesmo sem cookie, revoga a familia e limpa o cookie.
 
 `POST /auth/password-reset/confirm` e `DELETE /users/me` revogam todas as familias do usuario.
 
-Login, register, refresh e logout enviam `Cache-Control: no-store`.
+Login, register, refresh, logout, `GET /auth/me` e `GET /users/me` enviam `Cache-Control: no-store`.
 
-CORS usa so as origens do ambiente, com credenciais, metodos `GET, POST, PUT, PATCH, DELETE, OPTIONS`, headers `Authorization`, `Content-Type` e `X-MAE-CSRF`, e `Vary: Origin`.
+CORS usa so as origens do ambiente, com credenciais, metodos `GET, POST, PUT, PATCH, DELETE, OPTIONS`, headers `Authorization`, `Content-Type`, `X-MAE-CSRF` e `X-MAE-Client`, e `Vary: Origin`.
 
 ## 4. Restaurar sessao
 
