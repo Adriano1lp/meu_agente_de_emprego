@@ -19,3 +19,5 @@ O app segue com Bearer e `JWT_EXPIRATION_MINUTES`. A web, em opt-in (`session: "
 Variáveis: `WEB_ACCESS_TOKEN_MINUTES`, `REFRESH_TOKEN_IDLE_DAYS`, `REFRESH_FAMILY_MAX_DAYS`, `JWT_ACCEPT_LEGACY_UNTYPED`, `JWT_LEGACY_UNTYPED_CUTOFF_ISO`, `RATE_LIMIT_TRUST_PROXY_HOPS`, `REFRESH_RATE_LIMIT_PER_IP_ENABLED`.
 
 No deploy, `JWT_LEGACY_UNTYPED_CUTOFF_ISO` recebe o horário do deploy. O limite de `POST /auth/refresh` vale por processo.
+
+O limite de gravação do CV estruturado (`POST` e `PUT /users/me/cv/structured`, `STRUCTURED_CV_RATE_LIMIT_PER_HOUR`) fica em memória, vale por processo e assume um único worker. Antes de escalar, esse contador precisa migrar para o banco ou para o Redis.

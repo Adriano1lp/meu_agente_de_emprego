@@ -1,6 +1,7 @@
 """Limite em memoria de POST e PUT /users/me/cv/structured, por usuario.
 
-O contador vive no processo. Nao e compartilhado entre instancias.
+O contador vive no processo, nao e compartilhado entre instancias e assume
+um unico worker. Antes de escalar, migre para o banco ou para o Redis.
 A janela e de uma hora. O padrao e 10 gravacoes; o valor vem do ambiente.
 """
 

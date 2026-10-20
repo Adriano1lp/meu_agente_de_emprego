@@ -657,6 +657,34 @@ def update_structured_cv(user_id: str, record: dict[str, Any]) -> bool:
         return cursor.rowcount > 0
 
 
+def delete_structured_cv_sem_documento(user_id: str) -> bool:
+    """Desfaz a reserva que ainda nao aponta para um user_document."""
+    if _use_mongodb():
+        return mongo_repository.delete_structured_cv_sem_documento(user_id)
+
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            DELETE FROM structured_cvs
+            WHERE user_id = ? AND document_id IS NULL
+            """,
+            (user_id,),
+        )
+        return cursor.rowcount > 0
+
+
+def delete_user_document(document_id: int | str) -> None:
+    if _use_mongodb():
+        mongo_repository.delete_user_document(document_id)
+        return
+
+    with _connect() as connection:
+        connection.execute(
+            "DELETE FROM user_documents WHERE document_id = ?",
+            (document_id,),
+        )
+
+
 def create_user_document(document: dict[str, Any]) -> int | str:
     if _use_mongodb():
         return mongo_repository.create_user_document(document)

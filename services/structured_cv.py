@@ -33,6 +33,8 @@ from database.repository import (
     count_embedding_chunks,
     create_user_document,
     delete_embedding_chunks,
+    delete_structured_cv_sem_documento,
+    delete_user_document,
     get_latest_user_document_id,
     get_structured_cv,
     get_user_by_id,
@@ -415,20 +417,45 @@ def criar_cv_estruturado(user_id: str, corpo: bytes) -> dict[str, Any]:
     agora = _agora_iso()
     canonico = texto_canonico(modelo)
     sha = hash_canonico(canonico)
-    document_id = _gravar_documento(user_id, canonico, versao=1)
-    gravou = insert_structured_cv({
+    registro = {
         "user_id": user_id,
         "version": 1,
         "data": _dados(modelo),
         "canonical_sha256": sha,
-        "document_id": document_id,
+        "document_id": None,
         "consent_version": modelo.consentimento.versao_termo,
         "consent_accepted_at": agora,
         "created_at": agora,
         "updated_at": agora,
-    })
-    if not gravou:
+    }
+    # A linha unica nasce antes do user_document: o perdedor da corrida
+    # recebe 409 e nao deixa documento orfao.
+    if not insert_structured_cv(registro):
         raise HTTPException(status_code=409, detail="CV estruturado ja existe")
+
+    try:
+        document_id = _gravar_documento(user_id, canonico, versao=1)
+    except Exception as exc:
+        delete_structured_cv_sem_documento(user_id)
+        logger.error(
+            "cv_estruturado_documento user_id=%s sha=%s error_type=%s",
+            user_id,
+            sha,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Nao foi possivel gravar o curriculo",
+        ) from None
+
+    registro["document_id"] = document_id
+    if not update_structured_cv(user_id, registro):
+        delete_user_document(document_id)
+        delete_structured_cv_sem_documento(user_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Nao foi possivel gravar o curriculo",
+        )
 
     _registrar_log(user_id, sha)
     embeddings = _reconstruir_embeddings(user_id, sha)

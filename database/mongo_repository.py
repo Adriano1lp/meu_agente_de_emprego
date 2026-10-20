@@ -397,6 +397,17 @@ def update_structured_cv(user_id: str, record: dict[str, Any]) -> bool:
     return int(getattr(result, "matched_count", 0)) > 0
 
 
+def delete_structured_cv_sem_documento(user_id: str) -> bool:
+    result = _get_collection("structured_cvs").delete_one(
+        {"user_id": user_id, "document_id": None},
+    )
+    return int(getattr(result, "deleted_count", 0)) > 0
+
+
+def delete_user_document(document_id: str) -> None:
+    _get_collection("user_documents").delete_one({"_id": document_id})
+
+
 def create_user_document(document: dict[str, Any]) -> str:
     ensure_user_exists(document["user_id"])
     now = _utc_now_iso()

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import json
 import logging
 import sqlite3
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
@@ -631,6 +634,220 @@ def test_corpo_acima_de_64kb_retorna_413(isolated_db, rag_com_provedor_falso):
     excedente = _post(client, session["auth"], payload)
     assert excedente.status_code == 422
     assert any(item["loc"][1] == "experiencias" for item in excedente.json()["detail"] if len(item["loc"]) > 1)
+
+
+def _token(auth: dict) -> str:
+    return auth["Authorization"].removeprefix("Bearer ")
+
+
+def _chamar_cv_asgi(token: str, *, metodo: str, content_length: str | None, blocos: list[bytes]):
+    from main import app
+
+    lidos = {"bytes": 0}
+    cursor = {"indice": 0}
+    headers = [
+        (b"host", b"test"),
+        (b"authorization", f"Bearer {token}".encode()),
+        (b"content-type", b"application/json"),
+    ]
+    if content_length is not None:
+        headers.append((b"content-length", content_length.encode("ascii")))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": metodo,
+        "scheme": "http",
+        "path": "/users/me/cv/structured",
+        "raw_path": b"/users/me/cv/structured",
+        "query_string": b"",
+        "headers": headers,
+        "client": ("127.0.0.1", 50000),
+        "server": ("test", 80),
+    }
+
+    async def receive():
+        if cursor["indice"] >= len(blocos):
+            return {"type": "http.request", "body": b"", "more_body": False}
+        pedaco = blocos[cursor["indice"]]
+        cursor["indice"] += 1
+        lidos["bytes"] += len(pedaco)
+        return {
+            "type": "http.request",
+            "body": pedaco,
+            "more_body": cursor["indice"] < len(blocos),
+        }
+
+    mensagens: list[dict] = []
+
+    async def send(message):
+        mensagens.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    inicio = next(item for item in mensagens if item["type"] == "http.response.start")
+    return inicio["status"], lidos["bytes"]
+
+
+@pytest.mark.parametrize("metodo", ["POST", "PUT"])
+def test_corpo_chunked_acima_do_limite_nao_le_o_resto(isolated_db, metodo):
+    client = _client()
+    session = _registrar(client, f"chunked.{metodo.lower()}.cv@example.com")
+    chunk = 8 * 1024
+    total = 64 * 1024 * 8
+    blocos = [b"x" * chunk for _ in range(total // chunk)]
+    status, lidos = _chamar_cv_asgi(
+        _token(session["auth"]),
+        metodo=metodo,
+        content_length=None,
+        blocos=blocos,
+    )
+    assert status == 413
+    assert lidos > 64 * 1024
+    assert lidos <= 64 * 1024 + chunk
+    assert lidos < total
+    assert client.get("/users/me/cv/structured", headers=session["auth"]).status_code == 404
+
+
+@pytest.mark.parametrize("metodo", ["POST", "PUT"])
+@pytest.mark.parametrize("content_length", ["-1", "-20", "abc", "1.5", "+10", "", "64kb"])
+def test_content_length_invalido_ou_negativo_nao_le_o_corpo(
+    isolated_db,
+    metodo,
+    content_length,
+):
+    slug = "".join(ch if ch.isalnum() else "x" for ch in content_length) or "vazio"
+    client = _client()
+    session = _registrar(client, f"cl.{metodo.lower()}.{slug}@example.com")
+    status, lidos = _chamar_cv_asgi(
+        _token(session["auth"]),
+        metodo=metodo,
+        content_length=content_length,
+        blocos=[b"x" * (128 * 1024)],
+    )
+    assert status == 400
+    assert lidos == 0
+
+
+@pytest.mark.parametrize("metodo", ["POST", "PUT"])
+def test_content_length_acima_de_64kb_nao_le_o_corpo(isolated_db, metodo):
+    client = _client()
+    session = _registrar(client, f"clgrande.{metodo.lower()}@example.com")
+    status, lidos = _chamar_cv_asgi(
+        _token(session["auth"]),
+        metodo=metodo,
+        content_length=str(64 * 1024 + 1),
+        blocos=[b"y" * (256 * 1024)],
+    )
+    assert status == 413
+    assert lidos == 0
+
+
+def test_documentacao_diz_que_limite_do_cv_estruturado_e_por_processo():
+    raiz = Path(__file__).resolve().parents[1]
+    textos = [
+        (raiz / "docs" / "README.md").read_text(encoding="utf-8"),
+        (raiz / "documento.md").read_text(encoding="utf-8"),
+    ]
+    for texto in textos:
+        assert "STRUCTURED_CV_RATE_LIMIT_PER_HOUR" in texto
+        assert "por processo" in texto
+        assert "único worker" in texto or "unico worker" in texto
+        assert "Redis" in texto
+        assert "banco" in texto
+
+
+def test_dois_posts_simultaneos_um_409_sem_documento_orfao(
+    isolated_db,
+    rag_com_provedor_falso,
+    monkeypatch,
+):
+    import services.structured_cv as servico
+    from fastapi.testclient import TestClient
+    from main import app
+
+    client = _client()
+    session = _registrar(client, "corrida.cv@example.com")
+    barreira = threading.Barrier(2)
+    real_insert = servico.insert_structured_cv
+    real_gravar = servico._gravar_documento
+    gravacoes: list[str] = []
+
+    def insert_sincronizado(record):
+        barreira.wait(timeout=10)
+        return real_insert(record)
+
+    def gravar(*args, **kwargs):
+        gravacoes.append(args[0])
+        return real_gravar(*args, **kwargs)
+
+    monkeypatch.setattr(servico, "insert_structured_cv", insert_sincronizado)
+    monkeypatch.setattr(servico, "_gravar_documento", gravar)
+
+    def chamar():
+        local = TestClient(app)
+        return local.post(
+            "/users/me/cv/structured",
+            headers=session["auth"],
+            json=_payload(),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        respostas = [
+            futuro.result(timeout=20)
+            for futuro in (pool.submit(chamar), pool.submit(chamar))
+        ]
+
+    codigos = sorted(item.status_code for item in respostas)
+    assert codigos == [201, 409], [(item.status_code, item.text) for item in respostas]
+    perdedor = next(item for item in respostas if item.status_code == 409)
+    assert perdedor.json()["detail"] == "CV estruturado ja existe"
+    assert len(gravacoes) == 1
+
+    with sqlite3.connect(isolated_db) as connection:
+        documentos = connection.execute(
+            "SELECT document_id FROM user_documents WHERE user_id = ?",
+            (session["user_id"],),
+        ).fetchall()
+        cv = connection.execute(
+            "SELECT document_id FROM structured_cvs WHERE user_id = ?",
+            (session["user_id"],),
+        ).fetchone()
+    assert len(documentos) == 1
+    assert cv is not None
+    assert cv[0] == documentos[0][0]
+
+
+def test_falha_ao_gravar_documento_desfaz_reserva(
+    isolated_db,
+    rag_com_provedor_falso,
+    monkeypatch,
+):
+    import services.structured_cv as servico
+
+    real_gravar = servico._gravar_documento
+
+    def falha(*args, **kwargs):
+        raise RuntimeError("disco-cheio-nao-vazar")
+
+    monkeypatch.setattr(servico, "_gravar_documento", falha)
+    client = _client()
+    session = _registrar(client, "reserva.cv@example.com")
+    resposta = _post(client, session["auth"])
+    assert resposta.status_code == 500, resposta.text
+    assert "disco-cheio-nao-vazar" not in resposta.text
+    with sqlite3.connect(isolated_db) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM structured_cvs WHERE user_id = ?",
+            (session["user_id"],),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM user_documents WHERE user_id = ?",
+            (session["user_id"],),
+        ).fetchone()[0] == 0
+
+    monkeypatch.setattr(servico, "_gravar_documento", real_gravar)
+    repetido = _post(client, session["auth"])
+    assert repetido.status_code == 201, repetido.text
 
 
 def test_falha_de_embedding_mantem_dados_e_has_embeddings_false(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import re
 import shutil
 import sqlite3
 import uuid
@@ -646,16 +647,33 @@ def upload_cv(
     })
 
 
+_CONTENT_LENGTH_DIGITOS = re.compile(r"^[0-9]+$")
+
+
 def _recusar_content_length_cv_estruturado(request: Request) -> None:
     declarado = request.headers.get("content-length")
     if declarado is None:
         return
-    try:
-        tamanho = int(declarado)
-    except ValueError:
-        return
-    if tamanho > LIMITE_CORPO_BYTES:
+    texto = declarado.strip()
+    if not _CONTENT_LENGTH_DIGITOS.fullmatch(texto):
+        raise HTTPException(status_code=400, detail="Content-Length invalido")
+    if int(texto) > LIMITE_CORPO_BYTES:
         raise HTTPException(status_code=413, detail="Corpo excede 64 KB")
+
+
+async def _ler_corpo_cv_estruturado(request: Request) -> bytes:
+    """Le o corpo somando os bytes e corta em 64 KB sem consumir o restante."""
+    _recusar_content_length_cv_estruturado(request)
+    total = 0
+    pedacos: list[bytes] = []
+    async for pedaco in request.stream():
+        if not pedaco:
+            continue
+        total += len(pedaco)
+        if total > LIMITE_CORPO_BYTES:
+            raise HTTPException(status_code=413, detail="Corpo excede 64 KB")
+        pedacos.append(pedaco)
+    return b"".join(pedacos)
 
 
 @app.post("/users/me/cv/structured", status_code=201)
@@ -663,8 +681,7 @@ async def create_structured_cv(
     request: Request,
     user_id: str = Depends(_require_terms_accepted),
 ) -> dict[str, Any]:
-    _recusar_content_length_cv_estruturado(request)
-    return criar_cv_estruturado(user_id, await request.body())
+    return criar_cv_estruturado(user_id, await _ler_corpo_cv_estruturado(request))
 
 
 @app.put("/users/me/cv/structured")
@@ -672,8 +689,7 @@ async def update_structured_cv(
     request: Request,
     user_id: str = Depends(_require_terms_accepted),
 ) -> dict[str, Any]:
-    _recusar_content_length_cv_estruturado(request)
-    return atualizar_cv_estruturado(user_id, await request.body())
+    return atualizar_cv_estruturado(user_id, await _ler_corpo_cv_estruturado(request))
 
 
 @app.get("/users/me/cv/structured")
