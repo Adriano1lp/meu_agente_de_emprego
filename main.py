@@ -84,6 +84,12 @@ from services.object_storage import (
     put_file,
     user_object_key,
 )
+from services.structured_cv import (
+    LIMITE_CORPO_BYTES,
+    atualizar_cv_estruturado,
+    criar_cv_estruturado,
+    obter_cv_estruturado,
+)
 from services.user_data import (
     get_user_profile,
     save_manual_profile,
@@ -137,6 +143,7 @@ _AUTH_NO_STORE_PATHS = {
     "/auth/logout",
     "/auth/me",
     "/users/me",
+    "/users/me/cv/structured",
 }
 
 
@@ -637,6 +644,43 @@ def upload_cv(
         "has_embeddings": True,
         "ready_for_analysis": True,
     })
+
+
+def _recusar_content_length_cv_estruturado(request: Request) -> None:
+    declarado = request.headers.get("content-length")
+    if declarado is None:
+        return
+    try:
+        tamanho = int(declarado)
+    except ValueError:
+        return
+    if tamanho > LIMITE_CORPO_BYTES:
+        raise HTTPException(status_code=413, detail="Corpo excede 64 KB")
+
+
+@app.post("/users/me/cv/structured", status_code=201)
+async def create_structured_cv(
+    request: Request,
+    user_id: str = Depends(_require_terms_accepted),
+) -> dict[str, Any]:
+    _recusar_content_length_cv_estruturado(request)
+    return criar_cv_estruturado(user_id, await request.body())
+
+
+@app.put("/users/me/cv/structured")
+async def update_structured_cv(
+    request: Request,
+    user_id: str = Depends(_require_terms_accepted),
+) -> dict[str, Any]:
+    _recusar_content_length_cv_estruturado(request)
+    return atualizar_cv_estruturado(user_id, await request.body())
+
+
+@app.get("/users/me/cv/structured")
+def read_structured_cv(
+    user_id: str = Depends(_require_terms_accepted),
+) -> dict[str, Any]:
+    return obter_cv_estruturado(user_id)
 
 
 @app.get("/users/me/cv")

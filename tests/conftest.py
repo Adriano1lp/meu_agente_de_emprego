@@ -14,10 +14,13 @@ os.environ["MONGODB_URI"] = ""
 @pytest.fixture(autouse=True)
 def _zera_limite_refresh():
     from services.refresh_rate_limit import reset_refresh_rate_limits
+    from services.structured_cv_rate_limit import reset_structured_cv_rate_limits
 
     reset_refresh_rate_limits()
+    reset_structured_cv_rate_limits()
     yield
     reset_refresh_rate_limits()
+    reset_structured_cv_rate_limits()
 
 
 @pytest.fixture

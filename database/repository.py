@@ -36,6 +36,7 @@ def initialize_database(database_path: Path | None = None) -> Path:
         _ensure_consent_columns(connection)
         _ensure_billing_schema(connection)
         _ensure_object_storage_schema(connection)
+        _ensure_structured_cv_schema(connection)
         connection.commit()
 
     return database_path
@@ -583,15 +584,95 @@ def get_user_profile(user_id: str) -> dict[str, Any] | None:
     }
 
 
+def get_structured_cv(user_id: str) -> dict[str, Any] | None:
+    if _use_mongodb():
+        return mongo_repository.get_structured_cv(user_id)
+
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT user_id, version, data_json, canonical_sha256, document_id,
+                consent_version, consent_accepted_at, created_at, updated_at
+            FROM structured_cvs
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return _structured_cv_from_row(row)
+
+
+def insert_structured_cv(record: dict[str, Any]) -> bool:
+    if _use_mongodb():
+        return mongo_repository.insert_structured_cv(record)
+
+    try:
+        with _connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO structured_cvs (
+                    user_id, version, data_json, canonical_sha256, document_id,
+                    consent_version, consent_accepted_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _structured_cv_values(record),
+            )
+    except sqlite3.IntegrityError as exc:
+        if "structured_cvs.user_id" in str(exc):
+            return False
+        raise
+    return True
+
+
+def update_structured_cv(user_id: str, record: dict[str, Any]) -> bool:
+    if _use_mongodb():
+        return mongo_repository.update_structured_cv(user_id, record)
+
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE structured_cvs
+            SET version = ?,
+                data_json = ?,
+                canonical_sha256 = ?,
+                document_id = ?,
+                consent_version = ?,
+                consent_accepted_at = ?,
+                updated_at = ?
+            WHERE user_id = ?
+            """,
+            (
+                record["version"],
+                _json_or_none(record.get("data")) or "{}",
+                record["canonical_sha256"],
+                record.get("document_id"),
+                record["consent_version"],
+                record["consent_accepted_at"],
+                record["updated_at"],
+                user_id,
+            ),
+        )
+        return cursor.rowcount > 0
+
+
 def create_user_document(document: dict[str, Any]) -> int | str:
     if _use_mongodb():
         return mongo_repository.create_user_document(document)
 
     ensure_user_exists(document["user_id"])
     document = {
-        **document,
+        "user_id": document["user_id"],
+        "document_type": document["document_type"],
+        "original_filename": document["original_filename"],
+        "original_content_type": document["original_content_type"],
+        "original_file_path": document["original_file_path"],
         "object_key": document.get("object_key"),
+        "extracted_text_path": document.get("extracted_text_path"),
         "extracted_text_object_key": document.get("extracted_text_object_key"),
+        "bytes_received": document["bytes_received"],
+        "checksum_sha256": document.get("checksum_sha256"),
     }
     with _connect() as connection:
         cursor = connection.execute(
@@ -1430,6 +1511,17 @@ def _sqlite_collect_user_export_payload(user_id: str) -> dict[str, Any]:
             """,
             (user_id,),
         ).fetchall()
+        structured_row = connection.execute(
+            """
+            SELECT user_id, version, data_json, canonical_sha256, document_id,
+                consent_version, consent_accepted_at, created_at, updated_at
+            FROM structured_cvs
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+    from database.structured_cv_export import public_structured_cv_export
 
     return {
         "user": user,
@@ -1463,6 +1555,9 @@ def _sqlite_collect_user_export_payload(user_id: str) -> dict[str, Any]:
         "documents": [_row_to_dict(row) or {} for row in document_rows],
         "generated_files": [_row_to_dict(row) or {} for row in file_rows],
         "processar_usage": [_row_to_dict(row) or {} for row in usage_rows],
+        "structured_cv": public_structured_cv_export(
+            None if structured_row is None else _structured_cv_from_row(structured_row),
+        ),
     }
 
 
@@ -1481,6 +1576,7 @@ def _sqlite_anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
             "development_plans",
             "processing_runs",
             "embedding_runs",
+            "structured_cvs",
             "user_documents",
             "user_profile_versions",
             "user_profiles",
@@ -1688,6 +1784,61 @@ def _ensure_billing_schema(connection: sqlite3.Connection) -> None:
         """
         INSERT OR IGNORE INTO schema_migrations (version, name)
         VALUES (3, 'stripe_essencial_quotas')
+        """
+    )
+
+
+def _structured_cv_values(record: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        record["user_id"],
+        record["version"],
+        _json_or_none(record.get("data")) or "{}",
+        record["canonical_sha256"],
+        record.get("document_id"),
+        record["consent_version"],
+        record["consent_accepted_at"],
+        record["created_at"],
+        record["updated_at"],
+    )
+
+
+def _structured_cv_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "user_id": row["user_id"],
+        "version": int(row["version"]),
+        "data": json.loads(row["data_json"]),
+        "canonical_sha256": row["canonical_sha256"],
+        "document_id": row["document_id"],
+        "consent_version": row["consent_version"],
+        "consent_accepted_at": row["consent_accepted_at"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _ensure_structured_cv_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS structured_cvs (
+            user_id TEXT PRIMARY KEY,
+            version INTEGER NOT NULL,
+            data_json TEXT NOT NULL,
+            canonical_sha256 TEXT NOT NULL,
+            document_id INTEGER,
+            consent_version TEXT NOT NULL,
+            consent_accepted_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+            FOREIGN KEY (document_id) REFERENCES user_documents (document_id)
+                ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO schema_migrations (version, name)
+        VALUES (7, 'structured_cvs')
         """
     )
 
