@@ -135,6 +135,20 @@ CREATE TABLE IF NOT EXISTS user_documents (
 CREATE INDEX IF NOT EXISTS idx_user_documents_user_id
     ON user_documents (user_id);
 
+CREATE TABLE IF NOT EXISTS structured_cvs (
+    user_id TEXT PRIMARY KEY,
+    version INTEGER NOT NULL,
+    data_json TEXT NOT NULL,
+    canonical_sha256 TEXT NOT NULL,
+    document_id INTEGER,
+    consent_version TEXT NOT NULL,
+    consent_accepted_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+    FOREIGN KEY (document_id) REFERENCES user_documents (document_id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS embedding_runs (
     embedding_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL,
@@ -294,3 +308,6 @@ VALUES (5, 'processar_usage_refunds');
 
 INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (6, 'refresh_token_families');
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (7, 'structured_cvs');

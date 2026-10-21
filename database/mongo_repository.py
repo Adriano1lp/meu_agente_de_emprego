@@ -364,6 +364,50 @@ def get_user_profile(user_id: str) -> dict[str, Any] | None:
     return dict(profile) if profile else None
 
 
+def get_structured_cv(user_id: str) -> dict[str, Any] | None:
+    document = _get_collection("structured_cvs").find_one(
+        {"user_id": user_id},
+        {"_id": 0},
+    )
+    if not document:
+        return None
+    return _structured_cv_from_document(document)
+
+
+def insert_structured_cv(record: dict[str, Any]) -> bool:
+    try:
+        from pymongo.errors import DuplicateKeyError
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dependencia pymongo nao instalada. Execute pip install -r requirements.txt."
+        ) from exc
+
+    try:
+        _get_collection("structured_cvs").insert_one(_structured_cv_to_document(record))
+    except DuplicateKeyError:
+        return False
+    return True
+
+
+def update_structured_cv(user_id: str, record: dict[str, Any]) -> bool:
+    result = _get_collection("structured_cvs").update_one(
+        {"user_id": user_id},
+        {"$set": _structured_cv_to_document(record, include_user_id=False)},
+    )
+    return int(getattr(result, "matched_count", 0)) > 0
+
+
+def delete_structured_cv_sem_documento(user_id: str) -> bool:
+    result = _get_collection("structured_cvs").delete_one(
+        {"user_id": user_id, "document_id": None},
+    )
+    return int(getattr(result, "deleted_count", 0)) > 0
+
+
+def delete_user_document(document_id: str) -> None:
+    _get_collection("user_documents").delete_one({"_id": document_id})
+
+
 def create_user_document(document: dict[str, Any]) -> str:
     ensure_user_exists(document["user_id"])
     now = _utc_now_iso()
@@ -924,6 +968,7 @@ def collect_user_export_payload(user_id: str) -> dict[str, Any]:
         "documents": documents,
         "generated_files": generated_files,
         "processar_usage": usage,
+        "structured_cv": _public_structured_cv(user_id),
     }
 
 
@@ -939,6 +984,7 @@ def anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
         "processing_runs",
         "embedding_runs",
         "embedding_chunks",
+        "structured_cvs",
         "user_documents",
         "user_profile_versions",
         "user_profiles",
@@ -1020,6 +1066,7 @@ def _ensure_indexes(database: Any) -> None:
         expireAfterSeconds=REFRESH_FAMILY_TTL_GRACE_SECONDS,
     )
     database.user_profiles.create_index("user_id", unique=True)
+    database.structured_cvs.create_index("user_id", unique=True)
     database.user_profile_versions.create_index(
         [("user_id", 1), ("version", 1)],
         unique=True,
@@ -1061,6 +1108,49 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
         return 0.0
 
     return dot / (left_norm * right_norm)
+
+
+def _structured_cv_to_document(
+    record: dict[str, Any],
+    *,
+    include_user_id: bool = True,
+) -> dict[str, Any]:
+    document = {
+        "version": record["version"],
+        "data": record.get("data"),
+        "canonical_sha256": record["canonical_sha256"],
+        "document_id": record.get("document_id"),
+        "consent": {
+            "versao_termo": record["consent_version"],
+            "accepted_at": record["consent_accepted_at"],
+        },
+        "updated_at": record["updated_at"],
+    }
+    if include_user_id:
+        document["user_id"] = record["user_id"]
+        document["created_at"] = record["created_at"]
+    return document
+
+
+def _structured_cv_from_document(document: dict[str, Any]) -> dict[str, Any]:
+    consent = document.get("consent") or {}
+    return {
+        "user_id": document.get("user_id"),
+        "version": int(document.get("version") or 0),
+        "data": document.get("data") or {},
+        "canonical_sha256": document.get("canonical_sha256"),
+        "document_id": document.get("document_id"),
+        "consent_version": consent.get("versao_termo"),
+        "consent_accepted_at": consent.get("accepted_at"),
+        "created_at": document.get("created_at"),
+        "updated_at": document.get("updated_at"),
+    }
+
+
+def _public_structured_cv(user_id: str) -> dict[str, Any] | None:
+    from database.structured_cv_export import public_structured_cv_export
+
+    return public_structured_cv_export(get_structured_cv(user_id))
 
 
 def _utc_now_iso() -> str:

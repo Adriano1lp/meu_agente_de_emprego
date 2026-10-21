@@ -1000,6 +1000,10 @@ Em local/dev, se `S3_ENDPOINT` / `S3_BUCKET` / chaves estiverem ausentes, o
 backend `local` grava em `STORAGE_DIR`. Em `ENV=production` ou
 `ENVIRONMENT=production` a API falha no boot sem essas vars.
 
+## Limite do CV estruturado
+
+`POST` e `PUT /users/me/cv/structured` respeitam `STRUCTURED_CV_RATE_LIMIT_PER_HOUR`. O contador fica em memoria, vale por processo e assume um unico worker. Antes de escalar para mais de um worker ou mais de uma instancia, ele precisa migrar para o banco ou para o Redis.
+
 ## Variaveis de ambiente relevantes
 
 - `OPENAI_API_KEY`
@@ -1013,6 +1017,7 @@ backend `local` grava em `STORAGE_DIR`. Em `ENV=production` ou
 - `WEB_ACCESS_TOKEN_MINUTES` (padrao 15; access da web)
 - `REFRESH_TOKEN_IDLE_DAYS` (padrao 7; ociosidade do refresh)
 - `REFRESH_FAMILY_MAX_DAYS` (padrao 30; limite absoluto da familia)
+- `STRUCTURED_CV_RATE_LIMIT_PER_HOUR` (padrao 10; contador em memoria, por processo, um unico worker; migrar para o banco ou Redis antes de escalar)
 - `MAX_UPLOAD_SIZE_MB`
 - `STORAGE_DIR`
 - `MONGODB_URI`

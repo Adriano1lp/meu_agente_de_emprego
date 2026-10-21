@@ -90,6 +90,10 @@ RATE_LIMIT_TRUST_PROXY_HOPS = _env_int(
     _TRUST_PROXY_HOPS_PADRAO,
 )
 
+
+def structured_cv_rate_limit_per_hour() -> int:
+    return _env_int("STRUCTURED_CV_RATE_LIMIT_PER_HOUR", 10)
+
 PASSWORD_RESET_EXPIRATION_MINUTES = int(
     os.getenv("PASSWORD_RESET_EXPIRATION_MINUTES", "30")
 )
