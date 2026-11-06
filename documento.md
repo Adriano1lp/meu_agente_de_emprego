@@ -1002,7 +1002,9 @@ backend `local` grava em `STORAGE_DIR`. Em `ENV=production` ou
 
 ## Limite do CV estruturado
 
-`POST` e `PUT /users/me/cv/structured` respeitam `STRUCTURED_CV_RATE_LIMIT_PER_HOUR`. O contador fica em memoria, vale por processo e assume um unico worker. Antes de escalar para mais de um worker ou mais de uma instancia, ele precisa migrar para o banco ou para o Redis.
+`POST` e `PUT /users/me/cv/structured` respeitam `STRUCTURED_CV_RATE_LIMIT_PER_HOUR` (padrao 10 gravacoes por hora). O contador fica em memoria, vale por processo e assume um unico worker. Antes de escalar para mais de um worker ou mais de uma instancia, ele precisa migrar para o banco ou para o Redis. So a gravacao persistida entra na cota. JSON invalido (422), conflito (409), CV ausente (404), corpo acima de 64 KB (413) e falha ao gravar o documento nao debitam.
+
+Um `GET` feito enquanto o `POST` ainda nao gravou o documento (`document_id` nulo) responde 409, sem o JSON do CV. Quando nao existe linha, o `GET` continua 404.
 
 ## Variaveis de ambiente relevantes
 

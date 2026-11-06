@@ -9,7 +9,6 @@ import json
 import logging
 import re
 import shutil
-import unicodedata
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -41,8 +40,15 @@ from database.repository import (
     insert_structured_cv,
     update_structured_cv,
 )
+from services.delimitador_prompt import (
+    neutralizar_texto_nao_confiavel,
+    normalizar_compatibilidade,
+)
 from services.object_storage import put_bytes, user_object_key
-from services.structured_cv_rate_limit import consume_structured_cv_write
+from services.structured_cv_rate_limit import (
+    consume_structured_cv_write,
+    release_structured_cv_write,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,11 +113,9 @@ class NivelIdioma(StrEnum):
 
 
 def sanitizar(valor: str, *, permitir_quebras: bool = False) -> str:
-    texto = unicodedata.normalize("NFC", valor)
-    texto = html.unescape(texto)
-    texto = _TAGS.sub("", texto)
-    texto = _limpar_controles(texto, permitir_quebras=permitir_quebras)
-    texto = _neutralizar_delimitador(texto)
+    texto = html.unescape(normalizar_compatibilidade(valor))
+    texto = _TAGS.sub("", normalizar_compatibilidade(texto))
+    texto = neutralizar_texto_nao_confiavel(texto, permitir_quebras=permitir_quebras)
     if permitir_quebras:
         linhas = [
             _ESPACOS_HORIZONTAIS.sub(" ", linha).strip()
@@ -122,32 +126,6 @@ def sanitizar(valor: str, *, permitir_quebras: bool = False) -> str:
         texto = _ESPACOS.sub(" ", texto).strip()
     if not texto:
         raise ValueError("vazio apos sanitizacao")
-    return texto
-
-
-def _limpar_controles(texto: str, *, permitir_quebras: bool) -> str:
-    saida: list[str] = []
-    for caractere in texto:
-        if caractere == "\t":
-            saida.append(" ")
-            continue
-        if caractere == "\r":
-            saida.append("\n" if permitir_quebras else " ")
-            continue
-        if caractere == "\n":
-            saida.append("\n" if permitir_quebras else " ")
-            continue
-        if unicodedata.category(caractere) in {"Cc", "Cf"}:
-            continue
-        saida.append(caractere)
-    return "".join(saida)
-
-
-def _neutralizar_delimitador(texto: str) -> str:
-    anterior = None
-    while anterior != texto:
-        anterior = texto
-        texto = texto.replace("<<<", "").replace(">>>", "").replace("[[", "")
     return texto
 
 
@@ -409,7 +387,6 @@ def hash_canonico(texto: str) -> str:
 
 def criar_cv_estruturado(user_id: str, corpo: bytes) -> dict[str, Any]:
     _recusar_corpo_grande(corpo)
-    _consumir_limite(user_id)
     modelo = _validar(corpo, CvEstruturadoCriacao)
     if get_structured_cv(user_id) is not None:
         raise HTTPException(status_code=409, detail="CV estruturado ja existe")
@@ -428,34 +405,13 @@ def criar_cv_estruturado(user_id: str, corpo: bytes) -> dict[str, Any]:
         "created_at": agora,
         "updated_at": agora,
     }
-    # A linha unica nasce antes do user_document: o perdedor da corrida
-    # recebe 409 e nao deixa documento orfao.
-    if not insert_structured_cv(registro):
-        raise HTTPException(status_code=409, detail="CV estruturado ja existe")
-
+    # A cota so entra quando a linha e o documento ficam gravados.
+    _reservar_limite(user_id)
     try:
-        document_id = _gravar_documento(user_id, canonico, versao=1)
-    except Exception as exc:
-        delete_structured_cv_sem_documento(user_id)
-        logger.error(
-            "cv_estruturado_documento user_id=%s sha=%s error_type=%s",
-            user_id,
-            sha,
-            type(exc).__name__,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Nao foi possivel gravar o curriculo",
-        ) from None
-
-    registro["document_id"] = document_id
-    if not update_structured_cv(user_id, registro):
-        delete_user_document(document_id)
-        delete_structured_cv_sem_documento(user_id)
-        raise HTTPException(
-            status_code=500,
-            detail="Nao foi possivel gravar o curriculo",
-        )
+        document_id = _persistir_criacao(user_id, registro, canonico, sha)
+    except Exception:
+        release_structured_cv_write(user_id)
+        raise
 
     _registrar_log(user_id, sha)
     embeddings = _reconstruir_embeddings(user_id, sha)
@@ -464,7 +420,6 @@ def criar_cv_estruturado(user_id: str, corpo: bytes) -> dict[str, Any]:
 
 def atualizar_cv_estruturado(user_id: str, corpo: bytes) -> dict[str, Any]:
     _recusar_corpo_grande(corpo)
-    _consumir_limite(user_id)
     modelo = _validar(corpo, CvEstruturadoAtualizacao)
     atual = get_structured_cv(user_id)
     if atual is None:
@@ -482,23 +437,34 @@ def atualizar_cv_estruturado(user_id: str, corpo: bytes) -> dict[str, Any]:
     sha = hash_canonico(canonico)
     versao = int(atual["version"]) + 1
     document_id = atual.get("document_id")
-    if sha != atual["canonical_sha256"]:
-        document_id = _gravar_documento(user_id, canonico, versao=versao)
+    # Mesmo sha nao basta se o documento vigente deixou de ser o estruturado
+    # (upload posterior ou gravacao que ainda nao apontou o document_id).
+    refazer = sha != atual["canonical_sha256"] or not _documento_atual_e_estruturado(
+        user_id,
+        atual,
+    )
 
-    gravou = update_structured_cv(user_id, {
-        "version": versao,
-        "data": _dados(modelo),
-        "canonical_sha256": sha,
-        "document_id": document_id,
-        "consent_version": consent_version,
-        "consent_accepted_at": consent_at,
-        "updated_at": agora,
-    })
-    if not gravou:
-        raise HTTPException(status_code=404, detail="CV estruturado nao encontrado")
+    _reservar_limite(user_id)
+    try:
+        document_id = _persistir_atualizacao(
+            user_id,
+            atual,
+            canonico,
+            sha=sha,
+            versao=versao,
+            document_id=document_id,
+            refazer=refazer,
+            consent_version=consent_version,
+            consent_at=consent_at,
+            agora=agora,
+            dados=_dados(modelo),
+        )
+    except Exception:
+        release_structured_cv_write(user_id)
+        raise
 
     _registrar_log(user_id, sha)
-    if sha != atual["canonical_sha256"]:
+    if refazer:
         embeddings = _reconstruir_embeddings(user_id, sha)
     else:
         embeddings = _estado_embeddings(user_id)
@@ -509,6 +475,14 @@ def obter_cv_estruturado(user_id: str) -> dict[str, Any]:
     atual = get_structured_cv(user_id)
     if atual is None:
         raise HTTPException(status_code=404, detail="CV estruturado nao encontrado")
+
+    if atual.get("document_id") is None:
+        # A linha ja existe, mas o documento ainda nao. GET concorrente
+        # no meio do POST nao devolve o JSON pela metade.
+        raise HTTPException(
+            status_code=409,
+            detail="CV estruturado ainda nao esta disponivel",
+        )
 
     usuario = get_user_by_id(user_id)
     email = "" if usuario is None else str(usuario.get("email") or "")
@@ -570,7 +544,7 @@ def _recusar_corpo_grande(corpo: bytes) -> None:
         raise HTTPException(status_code=413, detail="Corpo excede 64 KB")
 
 
-def _consumir_limite(user_id: str) -> None:
+def _reservar_limite(user_id: str) -> None:
     espera = consume_structured_cv_write(user_id)
     if espera is None:
         return
@@ -578,6 +552,96 @@ def _consumir_limite(user_id: str) -> None:
         status_code=429,
         detail="Muitas alteracoes do CV estruturado. Tente novamente mais tarde.",
         headers={"Retry-After": str(espera)},
+    )
+
+
+def _documento_atual_e_estruturado(user_id: str, atual: dict[str, Any]) -> bool:
+    document_id = atual.get("document_id")
+    if document_id is None:
+        return False
+    ultimo = get_latest_user_document_id(user_id)
+    return ultimo is not None and str(ultimo) == str(document_id)
+
+
+def _persistir_criacao(
+    user_id: str,
+    registro: dict[str, Any],
+    canonico: str,
+    sha: str,
+) -> int | str:
+    # A linha unica nasce antes do user_document: o perdedor da corrida
+    # recebe 409 e nao deixa documento orfao.
+    if not insert_structured_cv(registro):
+        raise HTTPException(status_code=409, detail="CV estruturado ja existe")
+
+    try:
+        document_id = _gravar_documento(user_id, canonico, versao=1)
+    except Exception as exc:
+        delete_structured_cv_sem_documento(user_id)
+        _log_falha_documento(user_id, sha, exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Nao foi possivel gravar o curriculo",
+        ) from None
+
+    registro["document_id"] = document_id
+    if not update_structured_cv(user_id, registro):
+        delete_user_document(document_id)
+        delete_structured_cv_sem_documento(user_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Nao foi possivel gravar o curriculo",
+        )
+    return document_id
+
+
+def _persistir_atualizacao(
+    user_id: str,
+    atual: dict[str, Any],
+    canonico: str,
+    *,
+    sha: str,
+    versao: int,
+    document_id: int | str | None,
+    refazer: bool,
+    consent_version: str,
+    consent_at: str,
+    agora: str,
+    dados: dict[str, Any],
+) -> int | str | None:
+    if refazer:
+        try:
+            document_id = _gravar_documento(user_id, canonico, versao=versao)
+        except Exception as exc:
+            _log_falha_documento(user_id, sha, exc)
+            raise HTTPException(
+                status_code=500,
+                detail="Nao foi possivel gravar o curriculo",
+            ) from None
+
+    gravou = update_structured_cv(user_id, {
+        "version": versao,
+        "data": dados,
+        "canonical_sha256": sha,
+        "document_id": document_id,
+        "consent_version": consent_version,
+        "consent_accepted_at": consent_at,
+        "updated_at": agora,
+    })
+    if not gravou:
+        anterior = atual.get("document_id")
+        if refazer and document_id is not None and str(document_id) != str(anterior):
+            delete_user_document(document_id)
+        raise HTTPException(status_code=404, detail="CV estruturado nao encontrado")
+    return document_id
+
+
+def _log_falha_documento(user_id: str, sha: str, exc: BaseException) -> None:
+    logger.error(
+        "cv_estruturado_documento user_id=%s sha=%s error_type=%s",
+        user_id,
+        sha,
+        type(exc).__name__,
     )
 
 
