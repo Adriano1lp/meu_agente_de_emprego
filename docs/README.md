@@ -20,4 +20,4 @@ Variáveis: `WEB_ACCESS_TOKEN_MINUTES`, `REFRESH_TOKEN_IDLE_DAYS`, `REFRESH_FAMI
 
 No deploy, `JWT_LEGACY_UNTYPED_CUTOFF_ISO` recebe o horário do deploy. O limite de `POST /auth/refresh` vale por processo.
 
-O limite de gravação do CV estruturado (`POST` e `PUT /users/me/cv/structured`, `STRUCTURED_CV_RATE_LIMIT_PER_HOUR`) fica em memória, vale por processo e assume um único worker. Antes de escalar, esse contador precisa migrar para o banco ou para o Redis.
+O limite de gravação do CV estruturado (`POST` e `PUT /users/me/cv/structured`, `STRUCTURED_CV_RATE_LIMIT_PER_HOUR`, padrão 10 por hora) fica em memória, vale por processo e assume um único worker. Antes de escalar, esse contador precisa migrar para o banco ou para o Redis. A cota só é debitada quando a gravação persiste: 422, 409, 404, 413 e falha ao gravar o documento não entram no balde.

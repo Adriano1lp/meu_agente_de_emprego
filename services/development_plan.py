@@ -12,6 +12,10 @@ from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 
 from config import OPENAI_CHAT_MODEL, ensure_openai_api_key
+from services.delimitador_prompt import (
+    INSTRUCAO_DADO_NAO_CONFIAVEL,
+    embrulhar_chamada,
+)
 from database.repository import (
     create_development_plan,
     get_active_development_plan,
@@ -193,6 +197,7 @@ def _synthesize_with_ai(summary: dict[str, Any]) -> dict[str, Any] | None:
                 id, title, description, category, gap, priority, status, weight.
 
                 Regras:
+                - {regra_dado_nao_confiavel}
                 - category deve ser "70", "20" ou "10".
                 - status inicial deve ser "pending".
                 - distribua acoes entre pratica 70, social 20 e estudo 10.
@@ -203,15 +208,19 @@ def _synthesize_with_ai(summary: dict[str, Any]) -> dict[str, Any] | None:
                 {summary}
             """,
             input_variables=["summary"],
+            partial_variables={
+                "regra_dado_nao_confiavel": INSTRUCAO_DADO_NAO_CONFIAVEL,
+            },
         )
         llm = ChatOpenAI(
             model_name=OPENAI_CHAT_MODEL,
             temperature=0.2,
             openai_api_key=ensure_openai_api_key(),
         )
-        result = (prompt | llm | parser).invoke(
+        result = (prompt | llm | parser).invoke(embrulhar_chamada(
             {"summary": json.dumps(summary, ensure_ascii=False)},
-        )
+            rotulos={"summary": "historico consolidado"},
+        ))
         return result if isinstance(result, dict) else None
     except Exception:
         return None

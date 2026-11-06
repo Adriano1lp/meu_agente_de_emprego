@@ -98,8 +98,10 @@ def test_geracao_de_carta_monta_prompt_e_texto_com_data_real(main_chat, monkeypa
     carta = main_chat.generate_cover_letter("Acme", "user-1")
     prompt = main_chat.prompt_carta_apresentacao.format(**capturado)
 
-    assert capturado["empresa"] == "Acme"
     assert capturado["data"] == DATA_D
+    assert "Acme" in capturado["empresa"]
+    assert "dado não confiável" in capturado["empresa"]
+    assert "]]" not in capturado["data"]
     assert DATA_D in prompt
     assert "[Cidade]" in prompt
     assert "[data atual]" not in prompt.lower()

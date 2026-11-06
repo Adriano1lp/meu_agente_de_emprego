@@ -2,7 +2,10 @@
 
 O contador vive no processo, nao e compartilhado entre instancias e assume
 um unico worker. Antes de escalar, migre para o banco ou para o Redis.
-A janela e de uma hora. O padrao e 10 gravacoes; o valor vem do ambiente.
+A janela e de uma hora. O padrao e 10 gravacoes validas; o valor vem do ambiente.
+
+O servico so consome a vaga quando a gravacao persiste, e devolve a vaga
+se a persistencia falha. Pedido invalido nao entra no balde.
 """
 
 from __future__ import annotations
@@ -47,6 +50,20 @@ def consume_structured_cv_write(user_id: str) -> int | None:
             return espera
         _registrar(chave, agora)
         return None
+
+
+def release_structured_cv_write(user_id: str) -> None:
+    """Devolve a ultima vaga quando a gravacao nao chegou a persistir."""
+    chave = f"usuario:{user_id}"
+    with _lock:
+        balde = _baldes.get(chave)
+        if not balde:
+            return
+        balde.pop()
+        if not balde:
+            _baldes.pop(chave, None)
+        else:
+            _baldes.move_to_end(chave)
 
 
 def _podar(chave: str, agora: float) -> deque[float]:

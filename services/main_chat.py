@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -20,6 +21,10 @@ from config import (
     ensure_openai_api_key,
 )
 from database.repository import find_similar_embedding_chunks, get_latest_user_cv_text
+from services.delimitador_prompt import (
+    INSTRUCAO_DADO_NAO_CONFIAVEL,
+    embrulhar_chamada,
+)
 
 OPENAI_API_KEY = ensure_openai_api_key()
 MINIMUM_MATCH_SCORE_TO_GENERATE_CURRICULUM = 60
@@ -148,6 +153,7 @@ prompt_analizar_vaga = PromptTemplate(
         {formato_de_saida}
 
         Regras:
+        - {regra_dado_nao_confiavel}
         - Normalize termos.
         - Priorize tecnologias e competencias repetidas.
         - Identifique palavras-chave usadas em ATS.
@@ -158,6 +164,7 @@ prompt_analizar_vaga = PromptTemplate(
     input_variables=["vaga"],
     partial_variables={
         "formato_de_saida": parseador_vaga.get_format_instructions(),
+        "regra_dado_nao_confiavel": INSTRUCAO_DADO_NAO_CONFIAVEL,
     },
 )
 
@@ -175,6 +182,7 @@ prompt_matching = PromptTemplate(
         {formato_de_saida}
 
         Regras:
+        - {regra_dado_nao_confiavel}
         - Compare semanticamente.
         - Nao penalize diferencas de nomenclatura.
         - Destaque lacunas criticas.
@@ -186,6 +194,7 @@ prompt_matching = PromptTemplate(
     input_variables=["contexto", "vaga"],
     partial_variables={
         "formato_de_saida": parseador_matching.get_format_instructions(),
+        "regra_dado_nao_confiavel": INSTRUCAO_DADO_NAO_CONFIAVEL,
     },
 )
 
@@ -203,6 +212,7 @@ prompt_otimizacao = PromptTemplate(
         {formato_de_saida}
 
         Regras:
+        - {regra_dado_nao_confiavel}
         - Priorize o que aumenta o match ATS.
         - Foque no que o recrutador busca.
         - Nunca peca mais dados adicionais.
@@ -212,6 +222,7 @@ prompt_otimizacao = PromptTemplate(
     input_variables=["vaga", "matching"],
     partial_variables={
         "formato_de_saida": parseador_otimizacao.get_format_instructions(),
+        "regra_dado_nao_confiavel": INSTRUCAO_DADO_NAO_CONFIAVEL,
     },
 )
 
@@ -228,6 +239,7 @@ prompt_curriculo_otimizado = PromptTemplate(
         Gerar um curriculo altamente aderente a vaga.
 
         REGRAS:
+        - {regra_dado_nao_confiavel}
         - Use palavras-chave da vaga naturalmente.
         - Reescreva experiencias com foco em impacto sem inventar dados.
         - Destaque tecnologias e resultados.
@@ -315,6 +327,9 @@ prompt_curriculo_otimizado = PromptTemplate(
         - Sem invencao de dados
     """,
     input_variables=["contexto", "vaga", "otimizacao"],
+    partial_variables={
+        "regra_dado_nao_confiavel": INSTRUCAO_DADO_NAO_CONFIAVEL,
+    },
 )
 
 prompt_resposta_usuario = PromptTemplate(
@@ -335,6 +350,7 @@ prompt_resposta_usuario = PromptTemplate(
         - Recomendacoes praticas para melhorar a aderencia.
 
         Regras:
+        - {regra_dado_nao_confiavel}
         - Linguagem simples e direta.
         - Sem JSON.
         - Sem termos tecnicos desnecessarios.
@@ -348,6 +364,9 @@ prompt_resposta_usuario = PromptTemplate(
         Resposta:
     """,
     input_variables=["vaga", "matching"],
+    partial_variables={
+        "regra_dado_nao_confiavel": INSTRUCAO_DADO_NAO_CONFIAVEL,
+    },
 )
 
 prompt_carta_apresentacao = PromptTemplate(
@@ -363,6 +382,7 @@ prompt_carta_apresentacao = PromptTemplate(
         Criar uma carta de apresentacao profissional, objetiva e aderente ao perfil do candidato.
 
         Regras:
+        - {regra_dado_nao_confiavel}
         - Escreva em primeira pessoa.
         - Use apenas informacoes presentes no contexto do candidato.
         - Nao invente cargos, empresas, metricas, formacoes ou tecnologias.
@@ -389,6 +409,9 @@ prompt_carta_apresentacao = PromptTemplate(
         [Nome do candidato quando disponivel]
     """,
     input_variables=["contexto", "empresa", "data"],
+    partial_variables={
+        "regra_dado_nao_confiavel": INSTRUCAO_DADO_NAO_CONFIAVEL,
+    },
 )
 
 embeddings = OpenAIEmbeddings(
@@ -424,8 +447,14 @@ def pipeline_with_details(
     if contexto is None or not str(contexto).strip():
         contexto = _load_candidate_context(vaga_texto, user_id)
 
-    vaga_struct = cadeia_1.invoke({"vaga": vaga_texto})
-    matching = cadeia_2.invoke({"contexto": contexto, "vaga": vaga_struct})
+    vaga_struct = cadeia_1.invoke(_com_dados_nao_confiaveis(
+        {"vaga": vaga_texto},
+        {"vaga": "texto da vaga"},
+    ))
+    matching = cadeia_2.invoke(_com_dados_nao_confiaveis(
+        {"contexto": contexto, "vaga": vaga_struct},
+        {"contexto": "contexto do candidato", "vaga": "vaga estruturada"},
+    ))
     match_score = _extract_match_score(matching)
 
     if match_score < MINIMUM_MATCH_SCORE_TO_GENERATE_CURRICULUM:
@@ -442,15 +471,19 @@ def pipeline_with_details(
             "should_generate_curriculum": False,
         }
 
-    otimizacao = cadeia_3.invoke({"vaga": vaga_struct, "matching": matching})
+    otimizacao = cadeia_3.invoke(_com_dados_nao_confiaveis(
+        {"vaga": vaga_struct, "matching": matching},
+        {"vaga": "vaga estruturada", "matching": "resultado do matching"},
+    ))
     resposta_usuario = _build_job_analysis_response(match_score, matching)
-    curriculo = cadeia_4.invoke(
+    curriculo = cadeia_4.invoke(_com_dados_nao_confiaveis(
+        {"contexto": contexto, "vaga": vaga_struct, "otimizacao": otimizacao},
         {
-            "contexto": contexto,
-            "vaga": vaga_struct,
-            "otimizacao": otimizacao,
+            "contexto": "contexto do candidato",
+            "vaga": "vaga estruturada",
+            "otimizacao": "estrategia de otimizacao",
         },
-    )
+    ))
 
     return {
         "curriculo": curriculo,
@@ -490,14 +523,30 @@ def generate_cover_letter(company_name: str, user_id: str) -> str:
 
     contexto = _load_candidate_context(empresa, user_id)
     data = formatar_data_carta()
-    carta = cadeia_carta_apresentacao.invoke(
-        {
-            "contexto": contexto,
-            "empresa": empresa,
-            "data": data,
-        },
-    )
+    carta = cadeia_carta_apresentacao.invoke({
+        **_com_dados_nao_confiaveis(
+            {"contexto": contexto, "empresa": empresa},
+            {"contexto": "contexto do candidato", "empresa": "empresa alvo"},
+        ),
+        "data": data,
+    })
     return aplicar_data_na_carta(str(carta), data)
+
+
+def _texto_de_prompt(valor: object) -> str:
+    if isinstance(valor, str):
+        return valor
+    return json.dumps(valor, ensure_ascii=False, default=str)
+
+
+def _com_dados_nao_confiaveis(
+    campos: dict[str, object],
+    rotulos: dict[str, str],
+) -> dict[str, str]:
+    return embrulhar_chamada(
+        {chave: _texto_de_prompt(valor) for chave, valor in campos.items()},
+        rotulos=rotulos,
+    )
 
 
 def load_candidate_context(vaga_texto: str, user_id: str) -> str:
