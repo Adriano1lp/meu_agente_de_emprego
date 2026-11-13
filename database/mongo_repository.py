@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from datetime import UTC, datetime
+import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from database.generated_file_names import cv_download_fields, is_cv_file_name
@@ -11,6 +12,7 @@ from config import MONGODB_DATABASE, MONGODB_URI
 _client: Any | None = None
 _database: Any | None = None
 _indexes_ready = False
+_TENTATIVAS_COTA = 32
 
 
 def is_configured() -> bool:
@@ -402,6 +404,67 @@ def delete_structured_cv_sem_documento(user_id: str) -> bool:
         {"user_id": user_id, "document_id": None},
     )
     return int(getattr(result, "deleted_count", 0)) > 0
+
+
+def reservar_structured_cv_write(
+    user_id: str,
+    *,
+    limite: int,
+    janela_segundos: int,
+    agora: datetime,
+) -> dict[str, Any]:
+    """Um documento por usuario. O version impede duas instancias de gravarem a 11a vaga."""
+    try:
+        from pymongo.errors import DuplicateKeyError
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Dependencia pymongo nao instalada. Execute pip install -r requirements.txt."
+        ) from exc
+
+    momento = _quota_agora(agora)
+    expira = momento + timedelta(seconds=janela_segundos)
+    token = secrets.token_hex(16)
+    collection = _get_collection("structured_cv_write_reservations")
+    for _ in range(_TENTATIVAS_COTA):
+        documento = collection.find_one({"user_id": user_id})
+        if documento is None:
+            version = None
+            reservas: list[dict[str, Any]] = []
+        else:
+            version = int(documento.get("version") or 0)
+            reservas = list(documento.get("reservations") or [])
+        vigentes = _reservas_vigentes(reservas, momento)
+        if len(vigentes) >= limite:
+            return {"expires_at": vigentes[0]["expires_at"]}
+        novas = [*vigentes, {"token": token, "expires_at": expira}]
+        if _gravar_cota(collection, user_id, version, novas, DuplicateKeyError):
+            return {"token": token}
+    raise RuntimeError("Nao foi possivel reservar a cota do CV estruturado")
+
+
+def liberar_structured_cv_write(user_id: str, token: str, *, agora: datetime) -> bool:
+    """Remove o token desse usuario. Repetir ou usar token alheio nao devolve outra vaga."""
+    if not user_id or not token:
+        return False
+
+    momento = _quota_agora(agora)
+    collection = _get_collection("structured_cv_write_reservations")
+    for _ in range(_TENTATIVAS_COTA):
+        documento = collection.find_one({"user_id": user_id})
+        if documento is None:
+            return False
+        version = int(documento.get("version") or 0)
+        vigentes = _reservas_vigentes(list(documento.get("reservations") or []), momento)
+        if not any(item["token"] == token for item in vigentes):
+            return False
+        novas = [item for item in vigentes if item["token"] != token]
+        if not novas:
+            if _apagar_cota(collection, user_id, version):
+                return True
+            continue
+        if _gravar_cota(collection, user_id, version, novas, None):
+            return True
+    raise RuntimeError("Nao foi possivel estornar a cota do CV estruturado")
 
 
 def delete_user_document(document_id: str) -> None:
@@ -985,6 +1048,7 @@ def anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
         "embedding_runs",
         "embedding_chunks",
         "structured_cvs",
+        "structured_cv_write_reservations",
         "user_documents",
         "user_profile_versions",
         "user_profiles",
@@ -1067,6 +1131,11 @@ def _ensure_indexes(database: Any) -> None:
     )
     database.user_profiles.create_index("user_id", unique=True)
     database.structured_cvs.create_index("user_id", unique=True)
+    database.structured_cv_write_reservations.create_index("user_id", unique=True)
+    database.structured_cv_write_reservations.create_index(
+        "expires_at",
+        expireAfterSeconds=0,
+    )
     database.user_profile_versions.create_index(
         [("user_id", 1), ("version", 1)],
         unique=True,
@@ -1155,6 +1224,66 @@ def _public_structured_cv(user_id: str) -> dict[str, Any] | None:
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def _quota_agora(agora: datetime) -> datetime:
+    if agora.tzinfo is None:
+        momento = agora.replace(tzinfo=UTC)
+    else:
+        momento = agora.astimezone(UTC)
+    return momento.replace(microsecond=0)
+
+
+def _reservas_vigentes(reservas: list[dict[str, Any]], agora: datetime) -> list[dict[str, Any]]:
+    saida: list[dict[str, Any]] = []
+    for reserva in reservas:
+        if not isinstance(reserva, dict):
+            continue
+        token = str(reserva.get("token") or "")
+        expira = reserva.get("expires_at")
+        if not token or not isinstance(expira, datetime):
+            continue
+        if expira.tzinfo is None:
+            expira = expira.replace(tzinfo=UTC)
+        else:
+            expira = expira.astimezone(UTC)
+        if expira > agora:
+            saida.append({"token": token, "expires_at": expira})
+    saida.sort(key=lambda item: (item["expires_at"], item["token"]))
+    return saida
+
+
+def _gravar_cota(
+    collection: Any,
+    user_id: str,
+    version: int | None,
+    reservas: list[dict[str, Any]],
+    duplicata: type[BaseException] | None,
+) -> bool:
+    expira = max(item["expires_at"] for item in reservas)
+    campos = {
+        "user_id": user_id,
+        "reservations": reservas,
+        "expires_at": expira,
+    }
+    if version is None:
+        try:
+            collection.insert_one({**campos, "version": 1})
+        except Exception as exc:
+            if duplicata is not None and isinstance(exc, duplicata):
+                return False
+            raise
+        return True
+    resultado = collection.update_one(
+        {"user_id": user_id, "version": version},
+        {"$set": campos, "$inc": {"version": 1}},
+    )
+    return int(getattr(resultado, "matched_count", 0)) > 0
+
+
+def _apagar_cota(collection: Any, user_id: str, version: int) -> bool:
+    resultado = collection.delete_one({"user_id": user_id, "version": version})
+    return int(getattr(resultado, "deleted_count", 0)) > 0
 
 
 def _mongo_insight_to_dict(document: dict[str, Any]) -> dict[str, Any]:

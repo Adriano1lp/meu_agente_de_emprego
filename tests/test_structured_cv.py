@@ -742,7 +742,7 @@ def test_content_length_acima_de_64kb_nao_le_o_corpo(isolated_db, metodo):
     assert lidos == 0
 
 
-def test_documentacao_diz_que_limite_do_cv_estruturado_e_por_processo():
+def test_documentacao_diz_que_limite_do_cv_estruturado_fica_no_banco():
     raiz = Path(__file__).resolve().parents[1]
     textos = [
         (raiz / "docs" / "README.md").read_text(encoding="utf-8"),
@@ -750,10 +750,17 @@ def test_documentacao_diz_que_limite_do_cv_estruturado_e_por_processo():
     ]
     for texto in textos:
         assert "STRUCTURED_CV_RATE_LIMIT_PER_HOUR" in texto
-        assert "por processo" in texto
-        assert "único worker" in texto or "unico worker" in texto
-        assert "Redis" in texto
-        assert "banco" in texto
+        assert "SQLite" in texto
+        assert "Mongo" in texto
+        assert "429" in texto
+        assert "Retry-After" in texto
+        assert "token" in texto
+        assert "422" in texto
+        assert "409" in texto
+        assert "404" in texto
+        assert "413" in texto
+        assert "contador fica em memoria" not in texto
+        assert "fica em memória, vale por processo" not in texto
 
 
 def test_dois_posts_simultaneos_um_409_sem_documento_orfao(
@@ -815,6 +822,12 @@ def test_dois_posts_simultaneos_um_409_sem_documento_orfao(
     assert len(documentos) == 1
     assert cv is not None
     assert cv[0] == documentos[0][0]
+    with sqlite3.connect(isolated_db) as connection:
+        reservas = connection.execute(
+            "SELECT COUNT(*) FROM structured_cv_write_reservations WHERE user_id = ?",
+            (session["user_id"],),
+        ).fetchone()[0]
+    assert reservas == 1
 
 
 def test_falha_ao_gravar_documento_desfaz_reserva(
@@ -842,6 +855,10 @@ def test_falha_ao_gravar_documento_desfaz_reserva(
         ).fetchone()[0] == 0
         assert connection.execute(
             "SELECT COUNT(*) FROM user_documents WHERE user_id = ?",
+            (session["user_id"],),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM structured_cv_write_reservations WHERE user_id = ?",
             (session["user_id"],),
         ).fetchone()[0] == 0
 
@@ -911,7 +928,12 @@ def test_delete_remove_cv_estruturado_documento_e_vetores_do_rag(
     assert TELEFONE not in str(erro.value.detail)
 
     with sqlite3.connect(isolated_db) as connection:
-        for tabela in ("structured_cvs", "user_documents", "embedding_runs"):
+        for tabela in (
+            "structured_cvs",
+            "structured_cv_write_reservations",
+            "user_documents",
+            "embedding_runs",
+        ):
             total = connection.execute(
                 f"SELECT COUNT(*) FROM {tabela} WHERE user_id = ?",
                 (session["user_id"],),
@@ -1143,6 +1165,10 @@ def test_mongo_grava_exporta_e_purge_apaga_vetores(monkeypatch):
     assert "document_id" not in _chaves(structured)
     assert "chroma_dir" not in _chaves(structured)
 
+    banco.colecao("structured_cv_write_reservations").insert_one({
+        "user_id": "user-mongo",
+        "token": "reserva-mongo",
+    })
     assert anonymize_and_purge_user("user-mongo", deleted_at="2026-02-01T00:00:00+00:00") is True
     assert get_structured_cv("user-mongo") is None
     depois = find_similar_embedding_chunks(
@@ -1153,6 +1179,9 @@ def test_mongo_grava_exporta_e_purge_apaga_vetores(monkeypatch):
     assert depois == []
     assert banco.colecao("embedding_chunks").count_documents({"user_id": "user-mongo"}) == 0
     assert banco.colecao("structured_cvs").count_documents({"user_id": "user-mongo"}) == 0
+    assert banco.colecao("structured_cv_write_reservations").count_documents(
+        {"user_id": "user-mongo"},
+    ) == 0
 
 
 def test_indice_unico_structured_cvs_no_mongo():
@@ -1185,6 +1214,11 @@ def test_indice_unico_structured_cvs_no_mongo():
         mongo_repository._indexes_ready = anterior
     chamadas = banco.colunas["structured_cvs"].chamadas
     assert ("user_id", {"unique": True}) in [(chaves, kwargs) for chaves, kwargs in chamadas]
+    cota = banco.colunas["structured_cv_write_reservations"].chamadas
+    assert ("user_id", {"unique": True}) in [(chaves, kwargs) for chaves, kwargs in cota]
+    assert ("expires_at", {"expireAfterSeconds": 0}) in [
+        (chaves, kwargs) for chaves, kwargs in cota
+    ]
 
 
 def test_neutraliza_fullwidth_nfkc_e_fecha_bloco(isolated_db, rag_com_provedor_falso):
@@ -1232,16 +1266,50 @@ def test_cota_de_10_so_debita_gravacao_valida(isolated_db, rag_com_provedor_fals
         content=b"{" + (b"x" * (64 * 1024)),
     )
     assert grande.status_code == 413
+    assert _contar_reservas(isolated_db, session["user_id"]) == 0
 
     assert _post(client, session["auth"]).status_code == 201
     assert _post(client, session["auth"]).status_code == 409
+    assert _contar_reservas(isolated_db, session["user_id"]) == 1
     payload = _payload()
     for _ in range(9):
         atualizado = _put(client, session["auth"], payload)
         assert atualizado.status_code == 200, atualizado.text
+    assert _contar_reservas(isolated_db, session["user_id"]) == 10
+
+    from services.structured_cv_rate_limit import reset_structured_cv_rate_limits
+
+    reset_structured_cv_rate_limits()
+    with sqlite3.connect(isolated_db) as primeira, sqlite3.connect(isolated_db) as segunda:
+        for conexao in (primeira, segunda):
+            total = conexao.execute(
+                "SELECT COUNT(*) FROM structured_cv_write_reservations WHERE user_id = ?",
+                (session["user_id"],),
+            ).fetchone()[0]
+            assert total == 10
+
     bloqueado = _put(client, session["auth"], payload)
     assert bloqueado.status_code == 429
-    assert int(bloqueado.headers["retry-after"]) >= 1
+    assert bloqueado.json()["detail"] == (
+        "Muitas alteracoes do CV estruturado. Tente novamente mais tarde."
+    )
+    espera = int(bloqueado.headers["retry-after"])
+    assert 1 <= espera <= 3600
+    invalido_no_limite = _put(
+        client,
+        session["auth"],
+        _payload(identificacao={"telefone": "119"}),
+    )
+    assert invalido_no_limite.status_code == 422
+    assert _contar_reservas(isolated_db, session["user_id"]) == 10
+
+
+def _contar_reservas(db_path, user_id: str) -> int:
+    with sqlite3.connect(db_path) as connection:
+        return connection.execute(
+            "SELECT COUNT(*) FROM structured_cv_write_reservations WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()[0]
 
 
 def _gravar_cv_de_arquivo(user_id: str) -> int | str:
@@ -1367,6 +1435,7 @@ def test_put_falha_ao_gravar_documento_nao_consome_cota_nem_vaza(
     leitura = client.get("/users/me/cv/structured", headers=session["auth"]).json()
     assert leitura["version"] == 1
     assert leitura["is_current"] is False
+    assert _contar_reservas(isolated_db, session["user_id"]) == 1
 
     monkeypatch.setattr(servico, "_gravar_documento", real)
     sucesso = _put(client, session["auth"], _payload())
