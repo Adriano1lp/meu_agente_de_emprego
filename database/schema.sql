@@ -149,6 +149,20 @@ CREATE TABLE IF NOT EXISTS structured_cvs (
     FOREIGN KEY (document_id) REFERENCES user_documents (document_id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS structured_cv_write_reservations (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_structured_cv_write_reservations_user
+    ON structured_cv_write_reservations (user_id, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_structured_cv_write_reservations_expires
+    ON structured_cv_write_reservations (expires_at);
+
 CREATE TABLE IF NOT EXISTS embedding_runs (
     embedding_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL,
@@ -311,3 +325,6 @@ VALUES (6, 'refresh_token_families');
 
 INSERT OR IGNORE INTO schema_migrations (version, name)
 VALUES (7, 'structured_cvs');
+
+INSERT OR IGNORE INTO schema_migrations (version, name)
+VALUES (8, 'structured_cv_write_reservations');

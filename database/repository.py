@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -37,6 +38,7 @@ def initialize_database(database_path: Path | None = None) -> Path:
         _ensure_billing_schema(connection)
         _ensure_object_storage_schema(connection)
         _ensure_structured_cv_schema(connection)
+        _ensure_structured_cv_write_quota_schema(connection)
         connection.commit()
 
     return database_path
@@ -669,6 +671,87 @@ def delete_structured_cv_sem_documento(user_id: str) -> bool:
             WHERE user_id = ? AND document_id IS NULL
             """,
             (user_id,),
+        )
+        return cursor.rowcount > 0
+
+
+def reservar_structured_cv_write(
+    user_id: str,
+    *,
+    limite: int,
+    janela_segundos: int,
+    agora: datetime,
+) -> dict[str, Any]:
+    """Reserva atomica. Devolve token ou expires_at da vaga mais antiga."""
+    momento = _normalizar_agora(agora)
+    if _use_mongodb():
+        return mongo_repository.reservar_structured_cv_write(
+            user_id,
+            limite=limite,
+            janela_segundos=janela_segundos,
+            agora=momento,
+        )
+
+    token = secrets.token_hex(16)
+    agora_iso = _iso(momento)
+    expira_iso = _iso(momento + timedelta(seconds=janela_segundos))
+    with _transacao_imediata() as connection:
+        connection.execute(
+            """
+            DELETE FROM structured_cv_write_reservations
+            WHERE expires_at <= ?
+            """,
+            (agora_iso,),
+        )
+        linha = connection.execute(
+            """
+            SELECT COUNT(*), MIN(expires_at)
+            FROM structured_cv_write_reservations
+            WHERE user_id = ? AND expires_at > ?
+            """,
+            (user_id, agora_iso),
+        ).fetchone()
+        total = int(linha[0] or 0)
+        if total >= limite:
+            antigo = linha[1]
+            if not antigo:
+                return {"expires_at": momento}
+            return {"expires_at": _parse_iso(str(antigo))}
+        connection.execute(
+            """
+            INSERT INTO structured_cv_write_reservations (
+                token, user_id, expires_at, created_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (token, user_id, expira_iso, agora_iso),
+        )
+        return {"token": token}
+
+
+def liberar_structured_cv_write(
+    user_id: str,
+    token: str,
+    *,
+    agora: datetime,
+) -> bool:
+    """Apaga so a reserva desse usuario e desse token. A segunda vez nao acha linha."""
+    if not user_id or not token:
+        return False
+    if _use_mongodb():
+        return mongo_repository.liberar_structured_cv_write(
+            user_id,
+            token,
+            agora=_normalizar_agora(agora),
+        )
+
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            DELETE FROM structured_cv_write_reservations
+            WHERE user_id = ? AND token = ?
+            """,
+            (user_id, token),
         )
         return cursor.rowcount > 0
 
@@ -1605,6 +1688,7 @@ def _sqlite_anonymize_and_purge_user(user_id: str, *, deleted_at: str) -> bool:
             "processing_runs",
             "embedding_runs",
             "structured_cvs",
+            "structured_cv_write_reservations",
             "user_documents",
             "user_profile_versions",
             "user_profiles",
@@ -1871,6 +1955,38 @@ def _ensure_structured_cv_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_structured_cv_write_quota_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS structured_cv_write_reservations (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_structured_cv_write_reservations_user
+            ON structured_cv_write_reservations (user_id, expires_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_structured_cv_write_reservations_expires
+            ON structured_cv_write_reservations (expires_at)
+        """
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO schema_migrations (version, name)
+        VALUES (8, 'structured_cv_write_reservations')
+        """
+    )
+
+
 def _ensure_object_storage_schema(connection: sqlite3.Connection) -> None:
     document_columns = {
         row["name"] if isinstance(row, sqlite3.Row) else row[1]
@@ -1989,3 +2105,47 @@ def _development_plan_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 def _use_mongodb() -> bool:
     return PERSISTENCE_BACKEND == "mongodb" and mongo_repository.is_configured()
+
+
+def _normalizar_agora(agora: datetime) -> datetime:
+    if agora.tzinfo is None:
+        momento = agora.replace(tzinfo=UTC)
+    else:
+        momento = agora.astimezone(UTC)
+    return momento.replace(microsecond=0)
+
+
+def _iso(momento: datetime) -> str:
+    return _normalizar_agora(momento).isoformat()
+
+
+def _parse_iso(valor: str) -> datetime:
+    momento = datetime.fromisoformat(valor)
+    if momento.tzinfo is None:
+        return momento.replace(tzinfo=UTC)
+    return momento.astimezone(UTC)
+
+
+@contextmanager
+def _transacao_imediata() -> Iterator[sqlite3.Connection]:
+    """Trava a escrita antes de contar, para duas conexoes nao passarem juntas do limite."""
+    initialize_database()
+    connection = sqlite3.connect(DATABASE_PATH, timeout=30, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    iniciou = False
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute("BEGIN IMMEDIATE")
+        iniciou = True
+        yield connection
+        connection.execute("COMMIT")
+    except Exception:
+        if iniciou:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+        raise
+    finally:
+        connection.close()
