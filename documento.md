@@ -990,6 +990,7 @@ Em producao, os dados de negocio ficam em colecoes MongoDB separadas por `user_i
 - `generated_files`
 - `processar_usage`
 - `stripe_webhook_events`
+- `structured_cv_write_reservations` (cota de gravacao do CV estruturado: token, usuario e expiracao; sem o corpo do CV)
 
 Arquivos de usuario (curriculo original, `cv.txt` e PDFs gerados) usam object
 storage S3-compativel (Cloudflare R2 em producao). A key sempre comeca com
@@ -1002,7 +1003,7 @@ backend `local` grava em `STORAGE_DIR`. Em `ENV=production` ou
 
 ## Limite do CV estruturado
 
-`POST` e `PUT /users/me/cv/structured` respeitam `STRUCTURED_CV_RATE_LIMIT_PER_HOUR` (padrao 10 gravacoes por hora). O contador fica em memoria, vale por processo e assume um unico worker. Antes de escalar para mais de um worker ou mais de uma instancia, ele precisa migrar para o banco ou para o Redis. So a gravacao persistida entra na cota. JSON invalido (422), conflito (409), CV ausente (404), corpo acima de 64 KB (413) e falha ao gravar o documento nao debitam.
+`POST` e `PUT /users/me/cv/structured` respeitam `STRUCTURED_CV_RATE_LIMIT_PER_HOUR` (padrao 10 gravacoes por hora). A cota fica no banco (SQLite no local e nos testes, MongoDB em producao): uma reserva por gravacao valida, com validade de 1 hora. A reserva e atomica entre instancias. Reiniciar a API ou subir mais de um processo nao abre a 11a gravacao: a resposta continua 429 com `Retry-After`. O estorno devolve a reserva pelo token dela; estornar de novo nao devolve a cota em dobro, e um token de outro usuario e ignorado. So a gravacao persistida entra na cota. JSON invalido (422), conflito (409), CV ausente (404), corpo acima de 64 KB (413) e falha ao gravar o documento nao debitam. A reserva nao guarda o corpo do CV e o log nao registra esse corpo.
 
 Um `GET` feito enquanto o `POST` ainda nao gravou o documento (`document_id` nulo) responde 409, sem o JSON do CV. Quando nao existe linha, o `GET` continua 404.
 
@@ -1019,7 +1020,7 @@ Um `GET` feito enquanto o `POST` ainda nao gravou o documento (`document_id` nul
 - `WEB_ACCESS_TOKEN_MINUTES` (padrao 15; access da web)
 - `REFRESH_TOKEN_IDLE_DAYS` (padrao 7; ociosidade do refresh)
 - `REFRESH_FAMILY_MAX_DAYS` (padrao 30; limite absoluto da familia)
-- `STRUCTURED_CV_RATE_LIMIT_PER_HOUR` (padrao 10; contador em memoria, por processo, um unico worker; migrar para o banco ou Redis antes de escalar)
+- `STRUCTURED_CV_RATE_LIMIT_PER_HOUR` (padrao 10; cota no banco, SQLite ou MongoDB, compartilhada entre instancias, janela de 1 hora)
 - `MAX_UPLOAD_SIZE_MB`
 - `STORAGE_DIR`
 - `MONGODB_URI`

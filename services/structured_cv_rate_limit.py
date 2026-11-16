@@ -1,32 +1,29 @@
-"""Limite em memoria de POST e PUT /users/me/cv/structured, por usuario.
+"""Cota de POST e PUT /users/me/cv/structured, por usuario.
 
-O contador vive no processo, nao e compartilhado entre instancias e assume
-um unico worker. Antes de escalar, migre para o banco ou para o Redis.
-A janela e de uma hora. O padrao e 10 gravacoes validas; o valor vem do ambiente.
+A janela e de uma hora e o padrao e 10 gravacoes validas
+(STRUCTURED_CV_RATE_LIMIT_PER_HOUR). Cada reserva e uma linha no SQLite
+ou um item no documento do usuario no Mongo, com validade de 1 hora.
+O contador sobrevive a reinicio e vale para todas as instancias.
 
-O servico so consome a vaga quando a gravacao persiste, e devolve a vaga
-se a persistencia falha. Pedido invalido nao entra no balde.
+O servico devolve um token na reserva. O estorno apaga esse token, uma
+vez. Pedido invalido nao entra na cota: a reserva so acontece depois da
+validacao, e some se a gravacao nao persiste.
 """
 
 from __future__ import annotations
 
 import math
-import threading
-import time
-from collections import OrderedDict, deque
+from datetime import UTC, datetime
 
 import config
 
 _JANELA_SEGUNDOS = 60 * 60
 _PADRAO = 10
-_TETO_CHAVES = 10_000
-_lock = threading.Lock()
-_baldes: OrderedDict[str, deque[float]] = OrderedDict()
 
 
 def reset_structured_cv_rate_limits() -> None:
-    with _lock:
-        _baldes.clear()
+    """Nao apaga a cota no banco. O processo novo enxerga as mesmas reservas."""
+    return None
 
 
 def limite_por_hora() -> int:
@@ -36,67 +33,52 @@ def limite_por_hora() -> int:
     return valor
 
 
-def consume_structured_cv_write(user_id: str) -> int | None:
-    """Registra a gravacao. Devolve Retry-After em segundos se o limite estourou.
+def consume_structured_cv_write(user_id: str) -> str | int:
+    """Reserva uma gravacao. Devolve o token, ou Retry-After em segundos.
 
-    A recusa nao entra no balde, para a espera nao crescer a cada 429.
+    A recusa nao grava reserva, para a espera nao crescer a cada 429.
     """
-    agora = time.monotonic()
-    limite = limite_por_hora()
-    chave = f"usuario:{user_id}"
-    with _lock:
-        espera = _espera(chave, limite, agora)
-        if espera is not None:
-            return espera
-        _registrar(chave, agora)
-        return None
+    from database.repository import reservar_structured_cv_write
+
+    agora = _agora()
+    resultado = reservar_structured_cv_write(
+        user_id,
+        limite=limite_por_hora(),
+        janela_segundos=_JANELA_SEGUNDOS,
+        agora=agora,
+    )
+    token = resultado.get("token")
+    if isinstance(token, str) and token:
+        return token
+    expira = resultado.get("expires_at")
+    if isinstance(expira, datetime):
+        return _espera(expira, agora)
+    return 1
 
 
-def release_structured_cv_write(user_id: str) -> None:
-    """Devolve a ultima vaga quando a gravacao nao chegou a persistir."""
-    chave = f"usuario:{user_id}"
-    with _lock:
-        balde = _baldes.get(chave)
-        if not balde:
-            return
-        balde.pop()
-        if not balde:
-            _baldes.pop(chave, None)
-        else:
-            _baldes.move_to_end(chave)
+def release_structured_cv_write(user_id: str, token: str) -> None:
+    """Devolve a reserva identificada pelo token. Nao mexe nas outras."""
+    if not user_id or not token:
+        return
+    from database.repository import liberar_structured_cv_write
+
+    liberar_structured_cv_write(user_id, token, agora=_agora())
 
 
-def _podar(chave: str, agora: float) -> deque[float]:
-    balde = _baldes.get(chave)
-    if balde is None:
-        return deque()
-    corte = agora - _JANELA_SEGUNDOS
-    while balde and balde[0] <= corte:
-        balde.popleft()
-    if not balde:
-        _baldes.pop(chave, None)
-        return balde
-    _baldes.move_to_end(chave)
-    return balde
+def _agora() -> datetime:
+    return datetime.now(UTC).replace(microsecond=0)
 
 
-def _espera(chave: str, limite: int, agora: float) -> int | None:
-    balde = _podar(chave, agora)
-    if len(balde) < limite:
-        return None
-    if not balde:
-        return 1
-    restante = balde[0] + _JANELA_SEGUNDOS - agora
-    return max(1, math.ceil(restante))
-
-
-def _registrar(chave: str, agora: float) -> None:
-    balde = _baldes.get(chave)
-    if balde is None:
-        while len(_baldes) >= _TETO_CHAVES:
-            _baldes.popitem(last=False)
-        balde = deque()
-        _baldes[chave] = balde
+def _espera(expira: datetime, agora: datetime) -> int:
+    if expira.tzinfo is None:
+        expira = expira.replace(tzinfo=UTC)
     else:
-        _baldes.move_to_end(chave)
-    balde.append(agora)
+        expira = expira.astimezone(UTC)
+    if agora.tzinfo is None:
+        agora = agora.replace(tzinfo=UTC)
+    else:
+        agora = agora.astimezone(UTC)
+    restante = (expira - agora).total_seconds()
+    if restante <= 0:
+        return 1
+    return max(1, math.ceil(restante))

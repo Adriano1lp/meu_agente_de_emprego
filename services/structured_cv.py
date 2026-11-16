@@ -406,11 +406,11 @@ def criar_cv_estruturado(user_id: str, corpo: bytes) -> dict[str, Any]:
         "updated_at": agora,
     }
     # A cota so entra quando a linha e o documento ficam gravados.
-    _reservar_limite(user_id)
+    token = _reservar_limite(user_id)
     try:
         document_id = _persistir_criacao(user_id, registro, canonico, sha)
     except Exception:
-        release_structured_cv_write(user_id)
+        _estornar_limite(user_id, token)
         raise
 
     _registrar_log(user_id, sha)
@@ -444,7 +444,7 @@ def atualizar_cv_estruturado(user_id: str, corpo: bytes) -> dict[str, Any]:
         atual,
     )
 
-    _reservar_limite(user_id)
+    token = _reservar_limite(user_id)
     try:
         document_id = _persistir_atualizacao(
             user_id,
@@ -460,7 +460,7 @@ def atualizar_cv_estruturado(user_id: str, corpo: bytes) -> dict[str, Any]:
             dados=_dados(modelo),
         )
     except Exception:
-        release_structured_cv_write(user_id)
+        _estornar_limite(user_id, token)
         raise
 
     _registrar_log(user_id, sha)
@@ -544,15 +544,26 @@ def _recusar_corpo_grande(corpo: bytes) -> None:
         raise HTTPException(status_code=413, detail="Corpo excede 64 KB")
 
 
-def _reservar_limite(user_id: str) -> None:
-    espera = consume_structured_cv_write(user_id)
-    if espera is None:
-        return
-    raise HTTPException(
-        status_code=429,
-        detail="Muitas alteracoes do CV estruturado. Tente novamente mais tarde.",
-        headers={"Retry-After": str(espera)},
-    )
+def _reservar_limite(user_id: str) -> str:
+    resultado = consume_structured_cv_write(user_id)
+    if isinstance(resultado, int):
+        raise HTTPException(
+            status_code=429,
+            detail="Muitas alteracoes do CV estruturado. Tente novamente mais tarde.",
+            headers={"Retry-After": str(resultado)},
+        )
+    return resultado
+
+
+def _estornar_limite(user_id: str, token: str) -> None:
+    try:
+        release_structured_cv_write(user_id, token)
+    except Exception as exc:
+        logger.error(
+            "cv_estruturado_estorno user_id=%s error_type=%s",
+            user_id,
+            type(exc).__name__,
+        )
 
 
 def _documento_atual_e_estruturado(user_id: str, atual: dict[str, Any]) -> bool:
