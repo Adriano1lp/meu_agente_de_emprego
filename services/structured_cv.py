@@ -385,6 +385,27 @@ def hash_canonico(texto: str) -> str:
     return hashlib.sha256(texto.encode("utf-8")).hexdigest()
 
 
+def texto_canonico_se_vigente(user_id: str) -> str | None:
+    """Texto canônico quando o CV estruturado é o documento vigente.
+
+    Sem linha, com document_id nulo ou com outro CV mais recente, devolve
+    None para o chamador usar o CV atual. Não grava o conteúdo em log.
+    """
+    atual = get_structured_cv(user_id)
+    if atual is None or not _documento_atual_e_estruturado(user_id, atual):
+        return None
+    dados = atual.get("data")
+    if not isinstance(dados, dict):
+        logger.error("cv_estruturado_vigente error_type=dados_invalidos")
+        return None
+    try:
+        modelo = _CvBase.model_validate(dados)
+    except ValidationError:
+        logger.error("cv_estruturado_vigente error_type=ValidationError")
+        return None
+    return texto_canonico(modelo)
+
+
 def criar_cv_estruturado(user_id: str, corpo: bytes) -> dict[str, Any]:
     _recusar_corpo_grande(corpo)
     modelo = _validar(corpo, CvEstruturadoCriacao)

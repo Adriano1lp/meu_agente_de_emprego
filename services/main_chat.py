@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -25,6 +26,9 @@ from services.delimitador_prompt import (
     INSTRUCAO_DADO_NAO_CONFIAVEL,
     embrulhar_chamada,
 )
+from services.structured_cv import texto_canonico_se_vigente
+
+logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = ensure_openai_api_key()
 MINIMUM_MATCH_SCORE_TO_GENERATE_CURRICULUM = 60
@@ -580,7 +584,7 @@ def _load_candidate_context(vaga_texto: str, user_id: str) -> str:
             if content:
                 context_parts.append(content)
 
-    cv_text = _read_cv_file(user_id)
+    cv_text = resolver_texto_cv(user_id)
     if cv_text:
         context_parts.append(cv_text)
 
@@ -711,6 +715,27 @@ def _build_user_retriever(user_id: str):
         search_type="similarity",
         search_kwargs={"k": 6},
     )
+
+
+def resolver_texto_cv(user_id: str) -> str:
+    """Texto de CV da análise e da carta.
+
+    Estruturado vigente usa o texto canônico. Caso contrário, inclusive
+    document_id nulo, usa o CV atual. O log traz só a origem e o tamanho.
+    """
+    origem = "atual"
+    try:
+        canonico = texto_canonico_se_vigente(user_id)
+    except Exception as exc:
+        logger.error("cv_resolvido origem=atual error_type=%s", type(exc).__name__)
+        canonico = None
+    if canonico:
+        origem = "estruturado"
+        texto = canonico
+    else:
+        texto = _read_cv_file(user_id)
+    logger.info("cv_resolvido origem=%s tamanho=%s", origem, len(texto))
+    return texto
 
 
 def _read_cv_file(user_id: str) -> str:
